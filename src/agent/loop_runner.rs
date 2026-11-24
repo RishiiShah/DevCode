@@ -145,7 +145,7 @@ fn run_loop(
         };
 
         let step_start = Instant::now();
-        let response = match model.complete(&req) {
+        let mut response = match model.complete(&req) {
             Ok(resp) => {
                 consecutive_format_errors = 0;
                 resp
@@ -167,6 +167,12 @@ fn run_loop(
             Err(e) => return Err(e),
         };
 
+        if let Some(text) = &mut response.text {
+            *text = model.redact_sensitive(text);
+        }
+        for call in &mut response.tool_calls {
+            call.arguments = model.redact_sensitive(&call.arguments);
+        }
         let model_time = step_start.elapsed();
         total_input_tokens += response.usage.input_tokens;
         total_output_tokens += response.usage.output_tokens;
@@ -297,6 +303,7 @@ fn run_loop(
                 }
             };
 
+            let observation = model.redact_sensitive(&observation);
             output_bytes += observation.len();
             messages.push(Message::tool(observation, &call.id));
             if let Some((root, config)) = context {

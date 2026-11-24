@@ -11,6 +11,7 @@ fn config(url: String) -> ProviderConfig {
         kind: ProviderKind::OpenaiCompat,
         base_url: url,
         api_key_env: String::new(),
+        connector: None,
         model: "model".into(),
         context_window: 1000,
         max_rpm: None,

@@ -1,6 +1,7 @@
 pub mod env;
 pub mod path;
 pub mod process;
+pub mod tty;
 
 pub use env::{is_sensitive_env_var, strip_env};
 pub use path::{canonicalize, check_write_path, deny_devcode, is_devcode_path};

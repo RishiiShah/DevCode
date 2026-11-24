@@ -37,6 +37,8 @@ pub struct ProviderConfig {
     pub base_url: String,
     #[serde(default, deserialize_with = "deserialize_env_name")]
     pub api_key_env: String,
+    #[serde(default)]
+    pub connector: Option<String>,
     pub model: String,
     pub context_window: u64,
     #[serde(default)]
@@ -162,6 +164,9 @@ fn deserialize_env_name<'de, D: serde::Deserializer<'de>>(
 
 impl ProviderConfig {
     pub fn apply_nim_preset(&mut self) {
+        if self.connector.is_none() {
+            self.connector = Some("nim".into());
+        }
         if self.base_url.is_empty() {
             self.base_url = "https://integrate.api.nvidia.com/v1".into();
         }

@@ -2,6 +2,7 @@ pub mod agent;
 pub mod approval;
 pub mod cli;
 pub mod config;
+pub mod credentials;
 pub mod discipline;
 pub mod gate;
 pub mod guard;
@@ -79,10 +80,14 @@ pub enum RunOutput {
     Rollback(manifest::RollbackReport),
     Prompt(agent::LoopResult),
     Repl(Session),
+    Auth(Vec<String>),
 }
 
 pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
     let root = std::env::current_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
+    if let Some(Command::Auth { ref action }) = cli.command {
+        return auth(&root, &cli, action).map(RunOutput::Auth);
+    }
     if let Some(Command::Rollback { step }) = cli.command {
         return manifest::rollback_latest(&root, step)
             .map(RunOutput::Rollback)
@@ -113,5 +118,84 @@ pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
     match cli.prompt {
         Some(prompt) => session.prompt(&prompt).map(RunOutput::Prompt),
         None => Ok(RunOutput::Repl(session)),
+    }
+}
+
+fn auth(
+    root: &std::path::Path,
+    cli: &Cli,
+    action: &cli::AuthCommand,
+) -> Result<Vec<String>, DevCodeError> {
+    use std::io::{BufRead, IsTerminal};
+    let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
+    let absolute = if dir.is_absolute() {
+        dir
+    } else {
+        root.join(dir)
+    };
+    let mut ancestor = absolute.as_path();
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| DevCodeError::Config("invalid credentials directory".into()))?;
+    }
+    let canonical = ancestor
+        .canonicalize()
+        .map_err(|e| DevCodeError::Config(e.to_string()))?;
+    let workspace = root
+        .canonicalize()
+        .map_err(|e| DevCodeError::Config(e.to_string()))?;
+    if canonical.starts_with(&workspace) {
+        return Err(DevCodeError::Config(
+            "credentials directory must be outside the workspace".into(),
+        ));
+    }
+    let mut entries =
+        credentials::load(&absolute).map_err(|e| DevCodeError::Config(e.to_string()))?;
+    match action {
+        cli::AuthCommand::List => Ok(entries
+            .keys()
+            .map(|name| format!("{} stored", name))
+            .collect()),
+        cli::AuthCommand::Logout { name } => {
+            if entries.remove(name).is_some() {
+                credentials::save(&absolute, &entries)
+                    .map_err(|e| DevCodeError::Config(e.to_string()))?;
+            }
+            Ok(Vec::new())
+        }
+        cli::AuthCommand::Login { name, with_stdin } => {
+            let configured = load_config(root)
+                .map_err(|e| DevCodeError::Config(e.to_string()))?
+                .provider
+                .and_then(|p| p.connector);
+            let name = name
+                .clone()
+                .or_else(|| (cli.provider.as_deref() == Some("nim")).then(|| "nim".to_string()))
+                .or(configured)
+                .ok_or_else(|| DevCodeError::Config("connector name required".into()))?;
+            let stdin = std::io::stdin();
+            let key = if *with_stdin {
+                let mut key = String::new();
+                stdin
+                    .lock()
+                    .read_line(&mut key)
+                    .map_err(|e| DevCodeError::Config(e.to_string()))?;
+                key.trim_end_matches(['\r', '\n']).to_string()
+            } else if stdin.is_terminal() {
+                guard::tty::read_secret().map_err(|e| DevCodeError::Config(e.to_string()))?
+            } else {
+                return Err(DevCodeError::Config(
+                    "use --with-stdin when no TTY is available".into(),
+                ));
+            };
+            if key.is_empty() {
+                return Err(DevCodeError::Config("API key cannot be empty".into()));
+            }
+            entries.insert(name, key);
+            credentials::save(&absolute, &entries)
+                .map_err(|e| DevCodeError::Config(e.to_string()))?;
+            Ok(Vec::new())
+        }
     }
 }

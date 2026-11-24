@@ -23,21 +23,42 @@ impl OpenAiCompat {
             ));
         }
         let key = if config.api_key_env.is_empty() {
-            String::new()
+            None
         } else {
-            std::env::var(&config.api_key_env).map_err(|_| {
-                ModelError::Other(format!(
-                    "provider API key environment variable {} is missing",
-                    config.api_key_env
-                ))
-            })?
+            std::env::var(&config.api_key_env)
+                .ok()
+                .filter(|key| !key.is_empty())
         };
-        if !config.api_key_env.is_empty() && key.is_empty() {
-            return Err(ModelError::Other(format!(
-                "provider API key environment variable {} is empty",
-                config.api_key_env
-            )));
-        }
+        let key = match key {
+            Some(key) => key,
+            None if config.connector.is_none() && config.api_key_env.is_empty() => String::new(),
+            None => {
+                let stored = if let Some(name) = &config.connector {
+                    let dir = crate::credentials::config_dir()
+                        .map_err(|e| ModelError::Other(e.to_string()))?;
+                    let root =
+                        std::env::current_dir().map_err(|e| ModelError::Other(e.to_string()))?;
+                    crate::credentials::ensure_outside_workspace(&root, &dir)
+                        .map_err(|e| ModelError::Other(e.to_string()))?;
+                    crate::credentials::load(&dir)
+                        .map_err(|e| ModelError::Other(e.to_string()))?
+                        .remove(name)
+                } else {
+                    None
+                };
+                stored.filter(|key| !key.is_empty()).ok_or_else(|| {
+                    ModelError::Other(format!(
+                        "run `devcode auth login {}` or set {}",
+                        config.connector.as_deref().unwrap_or("NAME"),
+                        if config.api_key_env.is_empty() {
+                            "API_KEY_ENV"
+                        } else {
+                            &config.api_key_env
+                        }
+                    ))
+                })?
+            }
+        };
         if config.max_rpm == Some(0) {
             return Err(ModelError::Other(
                 "provider.max_rpm must be positive".into(),
@@ -227,6 +248,9 @@ impl OpenAiCompat {
 }
 
 impl Model for OpenAiCompat {
+    fn redact_sensitive(&self, text: &str) -> String {
+        self.redact(text)
+    }
     fn complete(&self, req: &Request) -> Result<Response, ModelError> {
         self.complete_inner(req, None, true)
             .map(|(response, _)| response)

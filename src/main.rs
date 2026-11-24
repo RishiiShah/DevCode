@@ -33,7 +33,18 @@ fn print_result(result: &LoopResult) {
     }
 }
 fn main() {
-    let result = devcode::run(Cli::parse());
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let args: Vec<_> = std::env::args_os().collect();
+            if args.iter().any(|a| a == "auth") && args.iter().any(|a| a == "login") {
+                eprintln!("invalid auth login arguments; pass the key via stdin or a TTY");
+                std::process::exit(2);
+            }
+            error.exit();
+        }
+    };
+    let result = devcode::run(cli);
     match result {
         Ok(RunOutput::Rollback(report)) => {
             for path in &report.restored_paths {
@@ -41,6 +52,11 @@ fn main() {
             }
             for path in &report.removed_paths {
                 println!("Removed {}", path.display());
+            }
+        }
+        Ok(RunOutput::Auth(lines)) => {
+            for line in lines {
+                println!("{}", line);
             }
         }
         Ok(RunOutput::Prompt(result)) => print_result(&result),

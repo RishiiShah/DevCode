@@ -13,6 +13,7 @@ fn nim_smoke() {
         kind: ProviderKind::OpenaiCompat,
         base_url: "https://integrate.api.nvidia.com/v1".into(),
         api_key_env: "NVIDIA_API_KEY".into(),
+        connector: None,
         model: "nvidia/nemotron-3.5-super-vl-120b-a12b".into(),
         context_window: 131072,
         max_rpm: None,

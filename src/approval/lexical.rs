@@ -199,6 +199,19 @@ pub fn is_protected_path(target: &str, root: &Path, guard_set: &[PathBuf]) -> bo
 /// Performs shell lexical guarding on a command before execution.
 pub fn check_shell_command(cmd: &str, root: &Path, guard_set: &[PathBuf]) -> CommandCheck {
     let stripped = strip_heredocs(cmd);
+    let lowered = stripped.to_ascii_lowercase();
+    let credential_path = crate::credentials::config_dir()
+        .ok()
+        .map(|dir| dir.join("credentials.json"));
+    let configured_path = credential_path
+        .as_ref()
+        .is_some_and(|path| stripped.contains(&*path.to_string_lossy()));
+    if lowered.contains("devcode/credentials")
+        || stripped.contains("DEVCODE_CONFIG_DIR")
+        || configured_path
+    {
+        return CommandCheck::Denied("access to stored credentials is denied".into());
+    }
     let subcommands = split_subcommands(&stripped);
 
     for subcmd in subcommands {
