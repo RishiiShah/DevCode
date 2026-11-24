@@ -321,6 +321,6 @@ Not checked:
 - [ ] A7 Tier 2 PageRank (CBU §4.4 evidence first).
 
 ## Current
-MVP merged to main; CI green on Ubuntu and macOS. Live results: docs/research/first-live-runs.md (RES-012).
-Next candidates (not started): M11 flag agent-authored test changes in the verification summary; user quickstart + PATH install of devcode; second provider live run; peer comparison for tokens per task.
+M0–M13 merged to main. Stored credentials (`devcode auth login/list/logout`, `/connect`) work live with NIM on macOS. Live results: docs/research/first-live-runs.md (RES-012).
+Next candidates (not started): second provider (Gemini) live run; a harder task in a real repo; TUI login modal and approval panels; debug/security profiles; peer comparison for tokens per task.
 Not built: debug/security profiles, Windows, installer, audit-log anchors, product name.
