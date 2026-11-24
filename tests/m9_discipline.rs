@@ -316,6 +316,7 @@ fn test_end_of_task_summary_line_matches_scripted_run() {
             text: Some("Declaring scope".to_string()),
             tool_calls: vec![ToolCall {
                 id: "call_scope".to_string(),
+                thought_signature: None,
                 name: "declare_scope".to_string(),
                 arguments: serde_json::json!({
                     "files": ["src/app.rs"],

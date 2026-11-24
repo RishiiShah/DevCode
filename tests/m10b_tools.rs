@@ -29,6 +29,7 @@ fn registry(root: &Path, yes: bool) -> ToolRegistry {
 fn call(tools: &ToolRegistry, name: &str, args: serde_json::Value) -> Result<String, String> {
     tools.execute(&ToolCall {
         id: "1".into(),
+        thought_signature: None,
         name: name.into(),
         arguments: args.to_string(),
     })
@@ -43,6 +44,7 @@ fn write_file_ask_rejected() {
                 text: None,
                 tool_calls: vec![ToolCall {
                     id: "1".into(),
+                    thought_signature: None,
                     name: "write_file".into(),
                     arguments: json!({"path":"a","content":"x"}).to_string(),
                 }],

@@ -9,6 +9,7 @@ pub mod guard;
 pub mod manifest;
 pub mod profile;
 pub mod tools;
+pub mod tui;
 
 pub use cli::{Cli, Command};
 pub use config::{
@@ -39,6 +40,7 @@ pub struct Session {
     tools: agent::ToolRegistry,
     model: Box<dyn agent::Model>,
     pub trace: bool,
+    pub progress: Option<agent::ProgressSink>,
 }
 impl Session {
     pub fn new(
@@ -55,12 +57,14 @@ impl Session {
             tools,
             model,
             trace: false,
+            progress: None,
         }
     }
     pub fn prompt(&self, prompt: &str) -> Result<agent::LoopResult, DevCodeError> {
         let limits = agent::LoopLimits {
             context_window: self.config.provider.as_ref().map(|p| p.context_window),
             trace: self.trace,
+            progress: self.progress.clone(),
             ..Default::default()
         };
         agent::run_agent_with_config(
@@ -73,6 +77,26 @@ impl Session {
             &self.config,
         )
         .map_err(|e| DevCodeError::Config(e.to_string()))
+    }
+    /// Re-reads `.devcode.json` and rebuilds the model; keeps tools and approval state.
+    pub fn reload(&mut self, cli: &Cli) -> Result<(), DevCodeError> {
+        let (config, model) = load_provider(&self.root, cli)?;
+        self.config = config;
+        self.model = model;
+        Ok(())
+    }
+    pub fn has_provider(&self) -> bool {
+        self.config.provider.is_some()
+    }
+    pub fn provider_label(&self) -> String {
+        match &self.config.provider {
+            Some(p) => format!(
+                "{} · {}",
+                p.connector.as_deref().unwrap_or("custom"),
+                p.model
+            ),
+            None => "no provider".into(),
+        }
     }
     pub fn connections(&self) -> Result<Vec<String>, DevCodeError> {
         let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
@@ -132,6 +156,43 @@ impl Session {
         self.config.provider = Some(provider);
         Ok(())
     }
+}
+
+/// Opens a session whose approval prompts use the given reader and writer (the TUI's channels).
+/// A missing or unusable provider does not fail here; the first prompt reports it.
+pub fn open_session<R, W>(
+    cli: &Cli,
+    prompt: approval::ApprovalPrompt<R, W>,
+) -> Result<Session, DevCodeError>
+where
+    R: std::io::BufRead + Send + 'static,
+    W: std::io::Write + Send + 'static,
+{
+    let root = std::env::current_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
+    let (config, model) = load_provider(&root, cli)?;
+    let tools = tools::registry_with_context(tools::MutationContext::new(
+        root.clone(),
+        tools::new_session_id(),
+        prompt,
+    ));
+    let mut session = Session::new(root, config, cli.profile, model, tools);
+    session.trace = cli.trace;
+    Ok(session)
+}
+
+fn load_provider(
+    root: &std::path::Path,
+    cli: &Cli,
+) -> Result<(Config, Box<dyn agent::Model>), DevCodeError> {
+    let mut config = load_config(root).map_err(|e| DevCodeError::Config(e.to_string()))?;
+    cli.apply_provider_preset(&mut config);
+    let model = config
+        .provider
+        .clone()
+        .ok_or_else(|| DevCodeError::Config("provider.model is missing from configuration".into()))
+        .and_then(build_model)
+        .unwrap_or_else(|err| Box::new(UnavailableModel(err.to_string())));
+    Ok((config, model))
 }
 
 pub enum RunOutput {

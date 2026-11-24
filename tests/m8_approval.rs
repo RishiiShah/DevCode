@@ -385,6 +385,7 @@ fn test_cli_rollback_subcommand_execution() {
         profile: devcode::Profile::Build,
         yes: false,
         trace: false,
+        plain: false,
         command: Some(CliCommand::Rollback { step: None }),
         prompt: None,
     };

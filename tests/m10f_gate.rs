@@ -154,6 +154,7 @@ fn trace_separates_model_tool_and_approval() {
     };
     let call = |name: &str, args: serde_json::Value| ToolCall {
         id: name.into(),
+        thought_signature: None,
         name: name.into(),
         arguments: args.to_string(),
     };

@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub trace: bool,
 
+    /// Use the plain line-based REPL instead of the full-screen interface
+    #[arg(long, default_value_t = false)]
+    pub plain: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 

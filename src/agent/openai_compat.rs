@@ -101,7 +101,11 @@ impl OpenAiCompat {
         messages.extend(req.messages.iter().map(|m| {
             let mut v = json!({"role":m.role,"content":m.content});
             if let Some(id) = &m.tool_call_id { v["tool_call_id"] = json!(id); }
-            if !m.tool_calls.is_empty() { v["tool_calls"] = json!(m.tool_calls.iter().map(|c| json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.arguments}})).collect::<Vec<_>>()); }
+            if !m.tool_calls.is_empty() { v["tool_calls"] = json!(m.tool_calls.iter().map(|c| {
+                let mut call = json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.arguments}});
+                if let Some(sig) = &c.thought_signature { call["extra_content"] = json!({"google":{"thought_signature":sig}}); }
+                call
+            }).collect::<Vec<_>>()); }
             v
         }));
         let tools: Vec<_> = req.tools.iter().map(|t| json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.parameters}})).collect();
@@ -185,6 +189,10 @@ impl OpenAiCompat {
                                 id: id.into(),
                                 name: name.into(),
                                 arguments: arguments.into(),
+                                thought_signature: item
+                                    .pointer("/extra_content/google/thought_signature")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
                             });
                         }
                     }

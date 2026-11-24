@@ -222,6 +222,7 @@ fn tty_connect_rebuilds_provider_for_next_request() {
         .env("DEVCODE_CONFIG_DIR", &config)
         .env_remove("M13_MISSING_TEST_KEY")
         .arg("--trace")
+        .arg("--plain")
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave))

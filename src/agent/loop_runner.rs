@@ -14,6 +14,59 @@ pub enum ExitReason {
     NoProgress,
 }
 
+/// Live progress notifications for a UI. Never carries file contents beyond a short preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressEvent {
+    /// A model request started (1-based step number).
+    Thinking { step: usize },
+    /// The model produced text (a final answer or commentary before tool calls).
+    Assistant { text: String },
+    /// A tool call is about to run.
+    ToolCall { name: String, summary: String },
+    /// A tool call finished; `preview` is the first line(s) of its output.
+    ToolResult {
+        name: String,
+        ok: bool,
+        preview: String,
+    },
+    /// Cumulative token usage after a model response.
+    Usage { input: u64, output: u64 },
+}
+
+/// Cloneable callback wrapper so `LoopLimits` keeps `Debug` and `Clone`.
+#[derive(Clone)]
+pub struct ProgressSink(pub std::sync::Arc<dyn Fn(ProgressEvent) + Send + Sync>);
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ProgressSink")
+    }
+}
+
+fn short(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        let cut: String = flat.chars().take(max).collect();
+        format!("{cut}…")
+    }
+}
+
+/// One-line, content-free-ish description of a call: its path/pattern/command, never file bodies.
+fn call_summary(arguments: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    for key in ["path", "command", "pattern", "query"] {
+        if let Some(text) = value.get(key).and_then(|v| v.as_str()) {
+            return short(text, 100);
+        }
+    }
+    if let Some(files) = value.get("files").and_then(|v| v.as_array()) {
+        let names: Vec<_> = files.iter().filter_map(|f| f.as_str()).collect();
+        return short(&names.join(", "), 100);
+    }
+    String::new()
+}
+
 #[derive(Debug, Clone)]
 pub struct LoopLimits {
     pub max_steps: usize,
@@ -21,6 +74,15 @@ pub struct LoopLimits {
     pub max_consecutive_format_errors: usize,
     pub context_window: Option<u64>,
     pub trace: bool,
+    pub progress: Option<ProgressSink>,
+}
+
+impl LoopLimits {
+    fn emit(&self, event: ProgressEvent) {
+        if let Some(sink) = &self.progress {
+            (sink.0)(event);
+        }
+    }
 }
 
 impl Default for LoopLimits {
@@ -31,6 +93,7 @@ impl Default for LoopLimits {
             max_consecutive_format_errors: 3,
             context_window: None,
             trace: false,
+            progress: None,
         }
     }
 }
@@ -145,6 +208,7 @@ fn run_loop(
         };
 
         let step_start = Instant::now();
+        limits.emit(ProgressEvent::Thinking { step: steps + 1 });
         let mut response = match model.complete(&req) {
             Ok(resp) => {
                 consecutive_format_errors = 0;
@@ -177,6 +241,15 @@ fn run_loop(
         total_input_tokens += response.usage.input_tokens;
         total_output_tokens += response.usage.output_tokens;
         steps += 1;
+        limits.emit(ProgressEvent::Usage {
+            input: total_input_tokens,
+            output: total_output_tokens,
+        });
+        if let Some(text) = response.text.as_deref().filter(|t| !t.trim().is_empty()) {
+            limits.emit(ProgressEvent::Assistant {
+                text: text.to_string(),
+            });
+        }
 
         if response.tool_calls.is_empty() {
             if limits.trace {
@@ -233,6 +306,16 @@ fn run_loop(
                         "",
                     ) {
                         Ok(summary) => verification = Some(summary.to_string()),
+                        // No test command configured: the model cannot satisfy the gate, so
+                        // finish honestly as unverified instead of looping until the step limit.
+                        Err(crate::gate::GateError::TestCommandNotRun)
+                            if config.verification.test_command.is_none() =>
+                        {
+                            verification = Some(
+                                "Verification Summary: UNVERIFIED. No test command is configured, so these changes were not tested. Set verification.test_command in .devcode.json."
+                                    .to_string(),
+                            );
+                        }
                         Err(e) => {
                             verification = Some(format!("Verification Summary: {}", e));
                             messages.push(Message::user(format!("Verification blocked: {}", e)));
@@ -288,22 +371,37 @@ fn run_loop(
             };
             let edits_before = log.entries.len();
             // Defense in depth: reject any tool outside profile allowlist
+            limits.emit(ProgressEvent::ToolCall {
+                name: call.name.clone(),
+                summary: call_summary(&call.arguments),
+            });
+            let mut tool_ok = true;
             let observation = if !profile.is_tool_allowed(&call.name) {
+                tool_ok = false;
                 format!(
                     "tool '{}' is disabled in '{}' profile",
                     call.name,
                     profile.name()
                 )
             } else if let Some(cmd) = baseline_required {
+                tool_ok = false;
                 format!("Run the configured test command first: {}. This records whether the problem reproduces.", cmd)
             } else {
                 match tools.execute(call) {
                     Ok(output) => output,
-                    Err(err) => format!("Error executing tool '{}': {}", call.name, err),
+                    Err(err) => {
+                        tool_ok = false;
+                        format!("Error executing tool '{}': {}", call.name, err)
+                    }
                 }
             };
 
             let observation = model.redact_sensitive(&observation);
+            limits.emit(ProgressEvent::ToolResult {
+                name: call.name.clone(),
+                ok: tool_ok,
+                preview: short(&observation, 160),
+            });
             output_bytes += observation.len();
             messages.push(Message::tool(observation, &call.id));
             if let Some((root, config)) = context {

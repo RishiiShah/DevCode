@@ -14,6 +14,7 @@ use std::process::Command;
 fn call(name: &str, args: Value) -> ToolCall {
     ToolCall {
         id: name.into(),
+        thought_signature: None,
         name: name.into(),
         arguments: args.to_string(),
     }

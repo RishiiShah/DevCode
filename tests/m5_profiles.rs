@@ -117,6 +117,7 @@ fn test_forced_call_to_write_file_in_ask_returns_error_and_does_not_mutate() {
             text: None,
             tool_calls: vec![ToolCall {
                 id: "call_write_force".to_string(),
+                thought_signature: None,
                 name: "write_file".to_string(),
                 arguments: "file.txt".to_string(),
             }],

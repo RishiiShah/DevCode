@@ -179,6 +179,7 @@ fn run_command_denies_credentials_path() {
     let err = tools
         .execute(&ToolCall {
             id: "1".into(),
+            thought_signature: None,
             name: "run_command".into(),
             arguments: serde_json::json!({"command":"cat $DEVCODE_CONFIG_DIR/credentials.json"})
                 .to_string(),
@@ -225,6 +226,7 @@ fn scripted_run_redacts_tool_output_and_arguments() {
             text: None,
             tool_calls: vec![ToolCall {
                 id: "1".into(),
+                thought_signature: None,
                 name: "read_file".into(),
                 arguments: "synthetic-secret-789".into(),
             }],

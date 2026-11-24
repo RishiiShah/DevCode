@@ -50,6 +50,13 @@ fn main() {
             error.exit();
         }
     };
+    if cli.prompt.is_none() && cli.command.is_none() && !cli.plain && devcode::tui::available() {
+        if let Err(e) = devcode::tui::run(cli) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
     let result = devcode::run(cli);
     match result {
         Ok(RunOutput::Rollback(report)) => {

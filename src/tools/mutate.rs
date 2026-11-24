@@ -49,19 +49,23 @@ impl MutationContext {
     }
 }
 
-/// Builds the concrete tool registry for one session.
-pub fn registry(root: PathBuf, auto_approve_edits: bool) -> ToolRegistry {
-    let session = format!(
+/// Unique id for one run's manifests and blobs.
+pub fn new_session_id() -> String {
+    format!(
         "{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default()
-    );
+    )
+}
+
+/// Builds the concrete tool registry for one session.
+pub fn registry(root: PathBuf, auto_approve_edits: bool) -> ToolRegistry {
     registry_with_context(MutationContext::new(
         root,
-        session,
+        new_session_id(),
         crate::approval::terminal_prompt(auto_approve_edits),
     ))
 }
