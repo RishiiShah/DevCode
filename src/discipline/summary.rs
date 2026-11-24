@@ -6,6 +6,7 @@ pub struct TaskSummary {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub files_edited: usize,
+    pub tests_changed: usize,
     pub files_changed_by_commands: usize,
     pub files_outside_scope: usize,
     pub dependencies_added: usize,
@@ -16,11 +17,12 @@ impl TaskSummary {
     /// "steps: N, tokens in: X, tokens out: Y, files edited: F, outside scope: S, dependencies added: D"
     pub fn format_line(&self) -> String {
         format!(
-            "steps: {}, tokens in: {}, tokens out: {}, files edited: {}, files changed by commands: {}, outside scope: {}, dependencies added: {}",
+            "steps: {}, tokens in: {}, tokens out: {}, files edited: {}, tests changed: {}, files changed by commands: {}, outside scope: {}, dependencies added: {}",
             self.steps,
             self.tokens_in,
             self.tokens_out,
             self.files_edited,
+            self.tests_changed,
             self.files_changed_by_commands,
             self.files_outside_scope,
             self.dependencies_added

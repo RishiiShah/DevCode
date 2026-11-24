@@ -321,6 +321,6 @@ Not checked:
 - [ ] A7 Tier 2 PageRank (CBU §4.4 evidence first).
 
 ## Current
-MVP loop works end to end on macOS with NVIDIA NIM (live runs, one-line fix: 6 steps, 1 edit approval, rollback verified). Done: M1–M9, M10a–M10h (see docs/mvp.md).
-Not checked: Linux CI (first push pending), larger tasks in a real repo, Gemini/second-provider live run, extra_body live run.
+MVP merged to main; CI green on Ubuntu and macOS. Live results: docs/research/first-live-runs.md (RES-012).
+Next candidates (not started): M11 flag agent-authored test changes in the verification summary; user quickstart + PATH install of devcode; second provider live run; peer comparison for tokens per task.
 Not built: debug/security profiles, Windows, installer, audit-log anchors, product name.

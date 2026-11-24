@@ -366,6 +366,6 @@ fn test_end_of_task_summary_line_matches_scripted_run() {
     let summary_line = summary.format_line();
     assert_eq!(
         summary_line,
-        "steps: 2, tokens in: 300, tokens out: 80, files edited: 0, files changed by commands: 0, outside scope: 0, dependencies added: 0"
+        "steps: 2, tokens in: 300, tokens out: 80, files edited: 0, tests changed: 0, files changed by commands: 0, outside scope: 0, dependencies added: 0"
     );
 }
