@@ -30,7 +30,11 @@ pub fn read_secret() -> io::Result<String> {
         }
     }
     let _restore = Restore { fd, original };
-    eprint!("API key: ");
+    // SAFETY: fd is the active terminal; TCIFLUSH discards pending input only.
+    if unsafe { libc::tcflush(fd, libc::TCIFLUSH) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    eprint!("Paste the key now. Input is hidden. ");
     io::stderr().flush()?;
     let mut key = String::new();
     stdin.lock().read_line(&mut key)?;

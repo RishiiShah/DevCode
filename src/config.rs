@@ -39,7 +39,9 @@ pub struct ProviderConfig {
     pub api_key_env: String,
     #[serde(default)]
     pub connector: Option<String>,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub context_window: u64,
     #[serde(default)]
     pub max_rpm: Option<u32>,

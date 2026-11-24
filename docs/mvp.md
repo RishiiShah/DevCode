@@ -251,6 +251,19 @@ Acceptance (tests set `DEVCODE_CONFIG_DIR` to a temp dir; never touch the real h
 - Key passed as an argument is rejected.
 Non-goals: OAuth or browser login (providers named so far use API keys; account-based login is provider-specific and unverified), OS keyring backend, multiple profiles per connector, Windows ACLs, encryption at rest.
 
+### M13. Safer login input and `/connect`
+Spec: new. Problem found live: a key pasted together with the command was echoed by the terminal before the hidden prompt started.
+Deliver:
+- `auth login` on a TTY discards pending typed-ahead input (`tcflush(TCIFLUSH)`, in `src/guard/tty.rs`) before it prints the prompt. The prompt text says: "Paste the key now. Input is hidden." Print it only after the flush. Document in `--help` that the key must not be pasted on the same paste as the command.
+- REPL slash commands: `/connect [NAME]` runs the same hidden prompt (TTY required), stores the key, rebuilds the provider from the current config, and continues the session; if the config lacks `provider.model`, say what is missing instead of failing later. `/connections` lists stored names (same output as `auth list`).
+- No new dependency; no TUI. A full-screen modal belongs to a later TUI milestone (see TODO.md).
+Acceptance:
+- Typed-ahead bytes are discarded before the prompt (PTY test using `openpty` with SAFETY comments in the test, or an explicit statement in the report that a PTY test was impractical; do not claim it was tested otherwise).
+- `/connect` with a scripted stdin (non-TTY) refuses with a clear message; with a TTY seam it stores the key and the next scripted request carries it.
+- `/connections` output contains names and no key characters.
+- The key appears in no output, trace, or error text.
+Non-goals: TUI modal, OAuth, keyring.
+
 ## 7. What the verifier checks
 
 1. Run the three commands in section 4 on macOS (and read the Linux CI result).

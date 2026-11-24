@@ -47,7 +47,7 @@ pub enum Command {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum AuthCommand {
-    /// Store a connector credential
+    /// Store a connector credential. Do not paste the key with the command; wait for the hidden prompt.
     Login {
         name: Option<String>,
         #[arg(long)]

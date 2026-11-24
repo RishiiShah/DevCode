@@ -74,6 +74,64 @@ impl Session {
         )
         .map_err(|e| DevCodeError::Config(e.to_string()))
     }
+    pub fn connections(&self) -> Result<Vec<String>, DevCodeError> {
+        let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
+        credentials::ensure_outside_workspace(&self.root, &dir)
+            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        Ok(credentials::load(&dir)
+            .map_err(|e| DevCodeError::Config(e.to_string()))?
+            .keys()
+            .map(|name| format!("{} stored", name))
+            .collect())
+    }
+    pub fn connect(&mut self, name: Option<&str>) -> Result<(), DevCodeError> {
+        use std::io::IsTerminal;
+        self.connect_with(name, std::io::stdin().is_terminal(), || {
+            guard::tty::read_secret().map_err(|e| DevCodeError::Config(e.to_string()))
+        })
+    }
+    pub fn connect_with<F>(
+        &mut self,
+        name: Option<&str>,
+        is_tty: bool,
+        read: F,
+    ) -> Result<(), DevCodeError>
+    where
+        F: FnOnce() -> Result<String, DevCodeError>,
+    {
+        let mut provider = self.config.provider.clone().ok_or_else(|| {
+            DevCodeError::Config("provider.model is missing from configuration".into())
+        })?;
+        if provider.model.trim().is_empty() {
+            return Err(DevCodeError::Config(
+                "provider.model is missing from configuration".into(),
+            ));
+        }
+        if !is_tty {
+            return Err(DevCodeError::Config(
+                "/connect requires a TTY for hidden input".into(),
+            ));
+        }
+        let name = name
+            .map(str::to_owned)
+            .or_else(|| provider.connector.clone())
+            .ok_or_else(|| DevCodeError::Config("connector name required".into()))?;
+        let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
+        credentials::ensure_outside_workspace(&self.root, &dir)
+            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        let mut entries =
+            credentials::load(&dir).map_err(|e| DevCodeError::Config(e.to_string()))?;
+        let key = read()?;
+        if key.is_empty() {
+            return Err(DevCodeError::Config("API key cannot be empty".into()));
+        }
+        entries.insert(name.clone(), key);
+        credentials::save(&dir, &entries).map_err(|e| DevCodeError::Config(e.to_string()))?;
+        provider.connector = Some(name);
+        self.model = build_model(provider.clone())?;
+        self.config.provider = Some(provider);
+        Ok(())
+    }
 }
 
 pub enum RunOutput {
@@ -98,19 +156,15 @@ pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
     }
     let mut config = load_config(&root).map_err(|e| DevCodeError::Config(e.to_string()))?;
     cli.apply_provider_preset(&mut config);
-    let provider = config
+    let model = match config
         .provider
         .clone()
-        .ok_or_else(|| DevCodeError::Config("provider configuration is missing".into()))?;
-    let model = agent::openai_compat::OpenAiCompat::new(provider.clone())
-        .map_err(|e| DevCodeError::Config(e.to_string()))?;
-    let model: Box<dyn agent::Model> = if let Some(rpm) = provider.max_rpm {
-        Box::new(agent::session::RateLimitedModel::new(
-            Box::new(model),
-            std::time::Duration::from_secs_f64(60.0 / f64::from(rpm)),
-        ))
-    } else {
-        Box::new(model)
+        .ok_or_else(|| DevCodeError::Config("provider.model is missing from configuration".into()))
+        .and_then(build_model)
+    {
+        Ok(model) => model,
+        Err(err) if cli.prompt.is_none() => Box::new(UnavailableModel(err.to_string())),
+        Err(err) => return Err(err),
     };
     let tools = tools::registry(root.clone(), cli.yes);
     let mut session = Session::new(root, config, cli.profile, model, tools);
@@ -197,5 +251,29 @@ fn auth(
                 .map_err(|e| DevCodeError::Config(e.to_string()))?;
             Ok(Vec::new())
         }
+    }
+}
+
+struct UnavailableModel(String);
+impl agent::Model for UnavailableModel {
+    fn complete(&self, _: &agent::Request) -> Result<agent::Response, agent::ModelError> {
+        Err(agent::ModelError::Other(self.0.clone()))
+    }
+}
+fn build_model(provider: config::ProviderConfig) -> Result<Box<dyn agent::Model>, DevCodeError> {
+    if provider.model.trim().is_empty() {
+        return Err(DevCodeError::Config(
+            "provider.model is missing from configuration".into(),
+        ));
+    }
+    let model = agent::openai_compat::OpenAiCompat::new(provider.clone())
+        .map_err(|e| DevCodeError::Config(e.to_string()))?;
+    if let Some(rpm) = provider.max_rpm {
+        Ok(Box::new(agent::session::RateLimitedModel::new(
+            Box::new(model),
+            std::time::Duration::from_secs_f64(60.0 / f64::from(rpm)),
+        )))
+    } else {
+        Ok(Box::new(model))
     }
 }

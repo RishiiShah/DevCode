@@ -61,12 +61,13 @@ fn test_cli_missing_configuration_and_manifest() {
     let root = tempfile::tempdir().unwrap();
     // Root execution
     let output_root = ProcessCommand::new(binary)
+        .arg("prompt")
         .current_dir(root.path())
         .output()
         .expect("failed to execute binary");
     assert_eq!(output_root.status.code(), Some(1));
     let stderr_root = String::from_utf8_lossy(&output_root.stderr);
-    assert!(stderr_root.contains("provider configuration is missing"));
+    assert!(stderr_root.contains("provider.model is missing"));
 
     // Rollback subcommand
     let output_rollback = ProcessCommand::new(binary)
