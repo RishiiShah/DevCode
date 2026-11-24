@@ -4,7 +4,7 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1002-CBU
-REVISION       : 0.3.0-draft
+REVISION       : 0.3.1-draft
 STATUS         : Working Draft (Engineering Specification)
 AUTHOR         : DevCode Core Engineering Group
 RELATED DOCS   : [docs/devcode.md](devcode.md), [docs/prd.md](prd.md)
@@ -158,6 +158,8 @@ Rather than attempting to build a custom AST taint-tracking engine (an intractab
 
 - **System Architecture**: [docs/devcode.md](devcode.md) (ATE-1000-ARCH)
 - **Product Requirements**: [docs/prd.md](prd.md) (ATE-1001-PRD)
+- **Reference Catalog**: [references/README.md](../references/README.md) (ATE-1003-REF)
+- **Empirical Research Series**: [docs/research/](research/) (DEVCODE-RES-001 through DEVCODE-RES-010; informative)
 - **External Specifications**:
   - Tree-sitter CST Grammars (`https://tree-sitter.github.io`)
   - Semgrep Rule Registry (`https://semgrep.dev/rules`)
