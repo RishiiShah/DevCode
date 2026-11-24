@@ -251,3 +251,29 @@ fn extra_body_fake_server() {
     assert!(body["tools"].is_array());
     assert_eq!(body["stream"], false);
 }
+
+#[test]
+fn thought_signature_is_read_and_echoed_back() {
+    let reply = r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","extra_content":{"google":{"thought_signature":"sig-abc"}},"function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+    let (url, requests) = scripted_server(vec![(200, reply.into()), (200, reply.into())]);
+    let model = OpenAiCompat::new(config(url)).unwrap();
+    let first = model.complete(&request()).unwrap();
+    assert_eq!(
+        first.tool_calls[0].thought_signature.as_deref(),
+        Some("sig-abc")
+    );
+    let mut next = request();
+    next.messages.push(devcode::agent::Message::assistant(
+        "",
+        first.tool_calls.clone(),
+    ));
+    model.complete(&next).unwrap();
+    let sent = requests.lock().unwrap();
+    let body = String::from_utf8_lossy(sent.last().unwrap()).into_owned();
+    let json: serde_json::Value =
+        serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(
+        json.pointer("/messages/1/tool_calls/0/extra_content/google/thought_signature"),
+        Some(&serde_json::json!("sig-abc"))
+    );
+}
