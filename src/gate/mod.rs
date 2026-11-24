@@ -25,6 +25,10 @@ pub struct VerificationSummary {
     pub status: CheckStatus,
     pub classification: ChangeClass,
     pub test_files_touched: Vec<PathBuf>,
+    pub agent_test_paths: Vec<PathBuf>,
+    pub test_lines_added: usize,
+    pub test_lines_removed: usize,
+    pub existing_tests_red_green: bool,
 }
 
 impl fmt::Display for VerificationSummary {
@@ -45,6 +49,17 @@ impl fmt::Display for VerificationSummary {
         writeln!(f, "  Classification: {}", class_str)?;
         if !self.test_files_touched.is_empty() {
             writeln!(f, "  Test Files Touched: {:?}", self.test_files_touched)?;
+        }
+        if !self.agent_test_paths.is_empty() {
+            let paths = self
+                .agent_test_paths
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(f, "Tests changed by the agent: {} file(s), +{}/-{} lines: {}. Review them; passing tests here were written in the same run.", self.agent_test_paths.len(), self.test_lines_added, self.test_lines_removed, paths)?;
+        } else if self.existing_tests_red_green {
+            writeln!(f, "No tests changed by the agent. Gate satisfied by a failing-then-passing run of the existing tests.")?;
         }
         Ok(())
     }
@@ -157,11 +172,21 @@ pub fn evaluate_gate(
         Some(cmd) => tool_log.check_status_for_command(cmd),
     };
 
+    let (agent_test_paths, test_lines_added, test_lines_removed) =
+        agent_test_changes(root, config, tool_log, modified_files);
+    let existing_tests_red_green = classification == ChangeClass::ClassA
+        && status == CheckStatus::Fresh
+        && test_files_touched.is_empty()
+        && configured_cmd.is_some_and(|cmd| tool_log.red_then_edit_then_green(cmd));
     let summary = VerificationSummary {
         test_command: configured_cmd.map(|s| s.to_string()),
         status: status.clone(),
         classification,
         test_files_touched: test_files_touched.clone(),
+        agent_test_paths,
+        test_lines_added,
+        test_lines_removed,
+        existing_tests_red_green,
     };
 
     // If Class C (whitespace only): exempt from tests
@@ -199,4 +224,47 @@ pub fn evaluate_gate(
     }
 
     Ok(summary)
+}
+
+/// Reports net line changes for test paths edited by file tools in this session.
+pub fn agent_test_changes(
+    root: &Path,
+    config: &Config,
+    log: &ToolLog,
+    changes: &[(PathBuf, String, String)],
+) -> (Vec<PathBuf>, usize, usize) {
+    use similar::{ChangeTag, TextDiff};
+    let matchers: Vec<_> = config
+        .verification
+        .test_globs
+        .iter()
+        .filter_map(|g| Glob::new(g).ok())
+        .map(|g| g.compile_matcher())
+        .collect();
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut paths: Vec<_> = log
+        .entries
+        .iter()
+        .filter(|e| e.kind == ToolKind::FileEdit)
+        .filter_map(|e| {
+            let resolved = crate::guard::canonicalize(root, Path::new(&e.detail)).ok()?;
+            let path = resolved.strip_prefix(&canonical_root).ok()?.to_path_buf();
+            matchers.iter().any(|m| m.is_match(&path)).then_some(path)
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let (mut added, mut removed) = (0, 0);
+    for (path, old, new) in changes {
+        if paths.binary_search(path).is_ok() {
+            for change in TextDiff::from_lines(old, new).iter_all_changes() {
+                match change.tag() {
+                    ChangeTag::Insert => added += 1,
+                    ChangeTag::Delete => removed += 1,
+                    ChangeTag::Equal => {}
+                }
+            }
+        }
+    }
+    (paths, added, removed)
 }

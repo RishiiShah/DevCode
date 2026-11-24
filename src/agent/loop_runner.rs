@@ -399,11 +399,17 @@ fn run_loop(
     let state = crate::agent::session::session_state(tools)?;
     let (files_edited, files_changed_by_commands, files_outside_scope, dependencies_added) =
         crate::agent::session::summary_counts(&state.log);
+    let default_config = crate::config::Config::default();
+    let (root, config) = context.unwrap_or((std::path::Path::new("."), &default_config));
+    let tests_changed = crate::gate::agent_test_changes(root, config, &state.log, &state.changes)
+        .0
+        .len();
     let summary = TaskSummary {
         steps,
         tokens_in: total_input_tokens,
         tokens_out: total_output_tokens,
         files_edited,
+        tests_changed,
         files_changed_by_commands,
         files_outside_scope,
         dependencies_added,

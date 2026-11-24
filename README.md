@@ -26,8 +26,39 @@ Empirical research notes supporting these normative standards are maintained und
 | **`ask`** | Questions about the codebase: explain, locate, compare | Strictly Read-Only | None (answers only; no edits, no artifact) |
 | **`plan`** | Architectural discovery, task breakdown, dependency mapping | Strictly Read-Only | Structured Technical Specification |
 | **`build`** | Test-driven implementation, surgical code edits, verification | Scoped Workspace Read/Write | Class-Based Test Gate + Linters + Compilers |
-| **`debug`** | Scientific root-cause isolation and regression-free resolution | Scoped Workspace Read/Write | Minimal Reproducer Test (Red $\rightarrow$ Green) |
-| **`security`** | Vulnerability auditing, secret detection, dependency CVE scan | Read-Only (Local DBs) | Gitleaks (Secrets) + Semgrep (SAST) |
+| **`debug`** (not built) | Scientific root-cause isolation and regression-free resolution | Scoped Workspace Read/Write | Minimal Reproducer Test (Red $\rightarrow$ Green) |
+| **`security`** (not built) | Vulnerability auditing, secret detection, dependency CVE scan | Read-Only (Local DBs) | Gitleaks (Secrets) + Semgrep (SAST) |
+
+## Quickstart (MVP, macOS and Linux)
+
+Status: working MVP, tested live only with NVIDIA NIM on macOS. `debug` and `security` profiles are not built; Windows is not supported yet.
+
+```sh
+cargo build --release          # binary: target/release/devcode
+export NVIDIA_API_KEY=...      # or the env var named in api_key_env; the key is never stored in config
+```
+
+Create `.devcode.json` in the repository you want to work on:
+
+```json
+{ "provider": { "kind": "openai_compat",
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "api_key_env": "NVIDIA_API_KEY",
+                "model": "<a model with tool calling>",
+                "context_window": 32000 },
+  "verification": { "test_command": "python3 -m unittest discover -s tests" } }
+```
+
+Any OpenAI-compatible endpoint works by changing `base_url`, `api_key_env` and `model` (`--provider nim` is a preset for NIM). Run:
+
+```sh
+devcode --profile ask   "where is the retry logic?"      # read-only
+devcode --profile plan  "add rate limiting to the API"   # read-only, structured plan
+devcode --profile build "fix the bug in calc.py"         # edits with approval, test gate
+devcode rollback                                         # undo the whole latest run
+```
+
+`--trace` writes per-step timing and token counts (no file contents) to `.devcode/trace.jsonl`. Do not paste input while `devcode` runs: approval prompts read stdin. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
 
 ## Platforms & Install (planned)
 
