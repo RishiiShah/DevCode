@@ -61,8 +61,9 @@ fn scripted_server(responses: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<Vec<
             stream.read_exact(&mut data[header_end..]).unwrap();
             recorded.lock().unwrap().push(data);
             write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-            stream.flush().unwrap();
-            stream.shutdown(Shutdown::Write).unwrap();
+            // The client may already have closed the socket; Linux reports ENOTCONN, macOS does not.
+            let _ = stream.flush();
+            let _ = stream.shutdown(Shutdown::Write);
         }
     });
     (format!("http://{address}"), requests)
