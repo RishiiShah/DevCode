@@ -1,0 +1,69 @@
+name: release
+
+# Builds binaries and Python wheels for a version tag (for example v0.1.0) and attaches them to a
+# GitHub Release. It does not publish to PyPI or Homebrew; see packaging/README.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name=devcode-${{ matrix.target }}.tar.gz
+          tar -czf "$name" -C target/${{ matrix.target }}/release devcode
+          if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            devcode-${{ matrix.target }}.tar.gz
+            devcode-${{ matrix.target }}.tar.gz.sha256
+
+  wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: python3 -m pip install --user maturin
+      - run: python3 -m maturin build --release --locked --target ${{ matrix.target }} --out dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m pip install --user maturin
+      - run: python3 -m maturin sdist --out dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz

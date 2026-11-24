@@ -62,6 +62,16 @@ Run `devcode` with no prompt in a terminal to open the full-screen interface: li
 
 `--trace` writes per-step timing and token counts (no file contents) to `.devcode/trace.jsonl`. Do not paste input while `devcode` runs: approval prompts read stdin. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
 
+## Install
+
+Works today (needs a Rust toolchain; no release has been published yet):
+
+```sh
+cargo install --git https://github.com/RishiiShah/DevCode
+```
+
+Prepared but not yet published, see [`packaging/README.md`](packaging/README.md): `install.sh` for release binaries, a Homebrew formula, and `pip`/`pipx` wheels built with maturin.
+
 ## Platforms & Install (planned)
 
 Beta: a static site on Cloudflare Pages (`<project>.pages.dev`) serves the two installer scripts; release binaries live in GitHub Releases on a personal account. No organization and no custom domain. `<install-host>` is that subdomain, still a placeholder because the product name is undecided; nothing below works today.
