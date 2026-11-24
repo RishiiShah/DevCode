@@ -116,6 +116,9 @@ impl RateLimitedModel {
     }
 }
 impl Model for RateLimitedModel {
+    fn redact_sensitive(&self, text: &str) -> String {
+        self.model.redact_sensitive(text)
+    }
     fn complete(&self, request: &Request) -> Result<Response, ModelError> {
         let mut last = self
             .last

@@ -108,5 +108,8 @@ impl fmt::Display for ModelError {
 impl std::error::Error for ModelError {}
 
 pub trait Model: Send + Sync {
+    fn redact_sensitive(&self, text: &str) -> String {
+        text.to_string()
+    }
     fn complete(&self, req: &Request) -> Result<Response, ModelError>;
 }

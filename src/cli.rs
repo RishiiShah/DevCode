@@ -32,12 +32,31 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Manage stored provider credentials
+    Auth {
+        #[command(subcommand)]
+        action: AuthCommand,
+    },
     /// Roll back the entire latest session (or step N and later)
     Rollback {
         /// Restore the state before this step
         #[arg(long)]
         step: Option<usize>,
     },
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum AuthCommand {
+    /// Store a connector credential. Do not paste the key with the command; wait for the hidden prompt.
+    Login {
+        name: Option<String>,
+        #[arg(long)]
+        with_stdin: bool,
+    },
+    /// List stored connector names
+    List,
+    /// Remove a connector credential
+    Logout { name: String },
 }
 
 impl Cli {

@@ -230,6 +230,40 @@ Acceptance:
 - Out-of-scope edit prompts; in-scope edit does not. Dependency add prompts and logs the justification. Compaction triggers at the threshold, keeps the pinned items, and preserves the last test result verbatim. End-of-task line numbers match the scripted run.
 Non-goals: LLM-written summaries, tokens-per-task benchmark against a peer (post-MVP), dependency "better than std" judgment (human decides at the prompt).
 
+### M12. Stored credentials and `devcode auth`
+Spec: new. Reference practice (code): Codex stores login state in a credentials file or the OS keyring behind a backend switch (`codex-rs/login`); OpenCode has an `auth` command. Neither is copied.
+Goal: use a provider without exporting an environment variable or keeping a `.env` file.
+Deliver:
+- `devcode auth login [NAME]`: NAME defaults to the preset in `.devcode.json` (`nim` for `--provider nim`). On a TTY, prompt for the API key with echo off. Without a TTY, `--with-stdin` reads one line from stdin; otherwise fail. Never accept the key as a command-line argument (it would land in shell history and `ps`).
+- `devcode auth list`: connector names and "stored", nothing from the key. `devcode auth logout NAME`: remove one entry; idempotent.
+- Storage: `credentials.json` in the user config directory (`$DEVCODE_CONFIG_DIR` if set, else `$XDG_CONFIG_HOME/devcode`, else `~/.config/devcode`). Directory mode 0700, file mode 0600, written atomically (temp file in the same directory, then rename). On load, if the file is group- or world-readable, refuse with a message that says how to fix it. Never inside a workspace.
+- Config: provider block gets optional `"connector": "<name>"`. `--provider nim` sets `connector = "nim"`. `api_key_env` stays optional.
+- Key resolution order: (1) env var named by `api_key_env`, when set and non-empty; (2) stored credential named by `connector`; (3) fail with a message naming both: "run `devcode auth login <name>` or set <ENV>". An endpoint that needs no key (`api_key_env` empty and no `connector`) still works.
+- The key is never printed, logged, put in trace, summary, error text, manifests, or the audit log.
+- Agent exposure: the agent can run shell commands. Add the credentials path pattern (`devcode/credentials`, `DEVCODE_CONFIG_DIR`) to the lexical guard as a deny, with a message. State in the report that this is an advisory rail, not isolation: a determined command can still reach the file. Real isolation is the post-MVP sandbox.
+- TTY no-echo needs termios: put the `unsafe` calls in `src/guard/tty.rs` with a soundness comment; no new crate.
+Acceptance (tests set `DEVCODE_CONFIG_DIR` to a temp dir; never touch the real home):
+- login via stdin stores the key; file mode is 0600 and directory 0700; `list` output contains the name and not one character of the key; `logout` removes it and a second `logout` succeeds.
+- A group-readable credentials file is refused with a fix message.
+- Resolution: env var set beats stored; env unset uses stored; neither fails with the two-way message; empty `api_key_env` plus no `connector` needs no key.
+- The key string appears in no stdout, stderr, trace line or error text across login, list, a scripted run and a failing provider call (401 whose body echoes the key).
+- `run_command` with `cat` on the credentials path is denied by the lexical guard.
+- Key passed as an argument is rejected.
+Non-goals: OAuth or browser login (providers named so far use API keys; account-based login is provider-specific and unverified), OS keyring backend, multiple profiles per connector, Windows ACLs, encryption at rest.
+
+### M13. Safer login input and `/connect`
+Spec: new. Problem found live: a key pasted together with the command was echoed by the terminal before the hidden prompt started.
+Deliver:
+- `auth login` on a TTY discards pending typed-ahead input (`tcflush(TCIFLUSH)`, in `src/guard/tty.rs`) before it prints the prompt. The prompt text says: "Paste the key now. Input is hidden." Print it only after the flush. Document in `--help` that the key must not be pasted on the same paste as the command.
+- REPL slash commands: `/connect [NAME]` runs the same hidden prompt (TTY required), stores the key, rebuilds the provider from the current config, and continues the session; if the config lacks `provider.model`, say what is missing instead of failing later. `/connections` lists stored names (same output as `auth list`).
+- No new dependency; no TUI. A full-screen modal belongs to a later TUI milestone (see TODO.md).
+Acceptance:
+- Typed-ahead bytes are discarded before the prompt (PTY test using `openpty` with SAFETY comments in the test, or an explicit statement in the report that a PTY test was impractical; do not claim it was tested otherwise).
+- `/connect` with a scripted stdin (non-TTY) refuses with a clear message; with a TTY seam it stores the key and the next scripted request carries it.
+- `/connections` output contains names and no key characters.
+- The key appears in no output, trace, or error text.
+Non-goals: TUI modal, OAuth, keyring.
+
 ## 7. What the verifier checks
 
 1. Run the three commands in section 4 on macOS (and read the Linux CI result).
