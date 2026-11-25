@@ -70,5 +70,8 @@ impl Cli {
                 provider.apply_nim_preset();
             }
         }
+        if let Some(provider) = &mut config.provider {
+            provider.infer_connector();
+        }
     }
 }

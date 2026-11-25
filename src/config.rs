@@ -193,6 +193,18 @@ pub fn preset(name: &str) -> Option<&'static Preset> {
 }
 
 impl ProviderConfig {
+    /// A config that points at a known provider's URL but names no connector gets that
+    /// provider's connector, so keys stored with /connect or `auth login` are found.
+    pub fn infer_connector(&mut self) {
+        if self.connector.is_some() {
+            return;
+        }
+        let url = self.base_url.trim_end_matches('/');
+        if let Some(p) = PRESETS.iter().find(|p| p.base_url == url) {
+            self.connector = Some(p.name.into());
+        }
+    }
+
     /// Reasoning-effort values this model accepts on the Gemini endpoint; empty when none.
     /// Taken from Google's OpenAI-compatibility table (cached copies disagree); not verified live.
     /// Unknown models get none rather than a guess that could produce a 400.
