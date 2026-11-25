@@ -1,6 +1,34 @@
-use devcode::credentials::{load, save};
+use devcode::credentials::{account_lines, load, save};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
+
+#[test]
+fn account_lines_mark_active_and_sources() {
+    let mut entries = BTreeMap::new();
+    entries.insert("nim".into(), "x".into());
+    entries.insert("custom-lab".into(), "y".into());
+    let lines = account_lines(&entries, Some("nim"));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("nim  stored") && l.contains('*')),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|l| l.starts_with("gemini  ")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.starts_with("openai  ")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.starts_with("openrouter  ")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("custom-lab  stored (custom)")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains('x') || l.contains('y')));
+}
+
 #[test]
 fn storage_modes_atomic_and_insecure_refusal() {
     let dir = tempfile::tempdir().unwrap();
@@ -105,7 +133,11 @@ fn login_list_logout_and_reject_argument() {
     let listed = auth(root.path(), &dir, &["auth", "list"], None);
     assert!(listed.status.success());
     let output = String::from_utf8(listed.stdout).unwrap();
-    assert!(output.contains("nim stored"));
+    assert!(
+        output.contains("nim  stored"),
+        "expected account status row, got: {output}"
+    );
+    assert!(output.contains("openai  missing") || output.contains("openai  env"));
     assert!(!output.contains(secret));
     let bad = auth(root.path(), &dir, &["auth", "login", "nim", secret], None);
     assert!(!bad.status.success());

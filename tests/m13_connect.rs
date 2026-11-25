@@ -170,7 +170,14 @@ fn connections_lists_names_only() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(combined.contains("nim stored"));
+    assert!(
+        combined.contains("nim  stored"),
+        "expected account status row, got: {combined}"
+    );
+    assert!(
+        combined.contains("gemini  missing") || combined.contains("gemini  env"),
+        "presets without keys must still list"
+    );
     assert!(!combined.contains("synthetic-secret-never-print"));
 }
 
@@ -237,7 +244,7 @@ fn tty_connect_rebuilds_provider_for_next_request() {
     assert!(headers.contains("Bearer synthetic-secret-M13"));
     visible.push_str(&read_until(&mut master, "safe response"));
     master.write_all(b"/connections\n").unwrap();
-    visible.push_str(&read_until(&mut master, "nim stored"));
+    visible.push_str(&read_until(&mut master, "nim  stored"));
     master.write_all(b"/exit\n").unwrap();
     assert!(child.wait().unwrap().success());
     server.join().unwrap();
@@ -247,6 +254,12 @@ fn tty_connect_rebuilds_provider_for_next_request() {
             .get("nim")
             .unwrap(),
         "synthetic-secret-M13"
+    );
+    let settings =
+        fs::read_to_string(config.join("settings.json")).expect("connect persists settings");
+    assert!(
+        settings.contains("\"connector\": \"nim\"") || settings.contains("\"connector\":\"nim\""),
+        "settings.json should remember the connected provider, got: {settings}"
     );
     assert!(!visible.contains("synthetic-secret-M13"));
     let trace = fs::read_to_string(root.path().join(".devcode/trace.jsonl")).unwrap();

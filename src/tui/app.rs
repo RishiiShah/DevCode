@@ -118,9 +118,9 @@ const HELP: &str = "Enter       send message or command
 /model [ID]         pick a model (catalog loads on connect/switch) or set one
 /provider [NAME]    switch provider (saved as your default; refreshes models)
 /effort [LEVEL]     reasoning effort; lists only what the current model accepts
-/connect [NAME]     store an API key (masked input)
-/connections        list stored connections
-/init [nim|gemini]  optional project scaffold (.devcode.json)
+/connect [NAME]     store an API key (masked input; saves as default)
+/connections        list accounts (stored|env|missing; * = active)
+/init [NAME]        optional project scaffold (.devcode.json)
 /rollback [N]       undo the latest run (or step N and later)
 /clear              clear the screen
 /exit               quit

@@ -222,7 +222,7 @@ pub struct Preset {
     pub default_model: &'static str,
 }
 
-pub const PRESETS: [Preset; 2] = [
+pub const PRESETS: [Preset; 4] = [
     Preset {
         name: "nim",
         base_url: "https://integrate.api.nvidia.com/v1",
@@ -235,6 +235,20 @@ pub const PRESETS: [Preset; 2] = [
         api_key_env: "GEMINI_API_KEY",
         // Prefer a catalog id that answers under load; gemini-3.8-flash often 503'd in RES-013.
         default_model: "gemini-3-flash-preview",
+    },
+    Preset {
+        name: "openai",
+        base_url: "https://api.openai.com/v1",
+        api_key_env: "OPENAI_API_KEY",
+        default_model: "gpt-4o",
+    },
+    // Claude and other vendors via OpenRouter's OpenAI-compatible API until a native
+    // Anthropic Messages adapter ships (mvp.md post-MVP). Pick Claude models with /model.
+    Preset {
+        name: "openrouter",
+        base_url: "https://openrouter.ai/api/v1",
+        api_key_env: "OPENROUTER_API_KEY",
+        default_model: "anthropic/claude-sonnet-4",
     },
 ];
 

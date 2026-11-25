@@ -65,6 +65,45 @@ pub fn save(dir: &Path, entries: &BTreeMap<String, String>) -> io::Result<()> {
     result
 }
 
+/// Account rows for `/connections` and `auth list` (OpenCode-style source column).
+/// Never includes key material. Active connector is marked with ` *`.
+pub fn account_lines(entries: &BTreeMap<String, String>, active: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for preset in &crate::config::PRESETS {
+        seen.insert(preset.name.to_string());
+        let stored = entries.contains_key(preset.name);
+        let env_ok = !preset.api_key_env.is_empty()
+            && std::env::var(preset.api_key_env)
+                .ok()
+                .is_some_and(|v| !v.is_empty());
+        let source = match (stored, env_ok) {
+            (true, true) => "stored+env",
+            (true, false) => "stored",
+            (false, true) => "env",
+            (false, false) => "missing",
+        };
+        let mark = if active == Some(preset.name) {
+            " *"
+        } else {
+            ""
+        };
+        lines.push(format!("{}  {}{}", preset.name, source, mark));
+    }
+    for name in entries.keys() {
+        if seen.contains(name.as_str()) {
+            continue;
+        }
+        let mark = if active == Some(name.as_str()) {
+            " *"
+        } else {
+            ""
+        };
+        lines.push(format!("{name}  stored (custom){mark}"));
+    }
+    lines
+}
+
 pub fn ensure_outside_workspace(root: &Path, dir: &Path) -> io::Result<()> {
     let absolute = if dir.is_absolute() {
         dir.to_path_buf()

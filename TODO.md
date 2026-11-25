@@ -348,6 +348,7 @@ TUI harden **U1–U12 complete**. Provider switching track closed for code path:
 - [x] **P7** Harder multi-file Gemini build: 7 steps, 1 source edit, tests red→green (RES-013 D14).
 - [x] **P8** Preset default model `gemini-3-flash-preview` (was `gemini-3.8-flash`, often 503).
 - [x] **P9** Auto model catalog: prefetch on TUI startup / `/connect` / `/provider` / `/init` reload; cache on `App.models`; `/model` opens from cache (peers: opencode `/models`, pi `/model`).
+- [x] **P10** Account connect (RES-014): richer `/connections`+`auth list` (stored|env|missing, `*` active); `/connect` persists settings; presets `openai` + `openrouter` (Claude via OpenRouter). OAuth/native Anthropic/keyring still deferred.
 
 Next: deferred A1–A7 (Windows, debug/security, audit anchors, installer, product name, ATE languages, PageRank). Optional: ignore `__pycache__` in command-change counting (RES-013 #3).
 

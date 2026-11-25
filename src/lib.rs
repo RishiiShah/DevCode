@@ -240,11 +240,13 @@ impl Session {
         let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
         credentials::ensure_outside_workspace(&self.root, &dir)
             .map_err(|e| DevCodeError::Config(e.to_string()))?;
-        Ok(credentials::load(&dir)
-            .map_err(|e| DevCodeError::Config(e.to_string()))?
-            .keys()
-            .map(|name| format!("{} stored", name))
-            .collect())
+        let entries = credentials::load(&dir).map_err(|e| DevCodeError::Config(e.to_string()))?;
+        let active = self
+            .config
+            .provider
+            .as_ref()
+            .and_then(|p| p.connector.as_deref());
+        Ok(credentials::account_lines(&entries, active))
     }
     pub fn connect(&mut self, name: Option<&str>) -> Result<(), DevCodeError> {
         use std::io::IsTerminal;
@@ -290,6 +292,8 @@ impl Session {
         entries.insert(name.clone(), key);
         credentials::save(&dir, &entries).map_err(|e| DevCodeError::Config(e.to_string()))?;
         provider.connector = Some(name);
+        // Match /provider: remember this account as the user default (best-effort).
+        let _ = crate::settings::persist_provider(&dir, &provider);
         self.model = build_model(provider.clone())?;
         self.config.provider = Some(provider);
         Ok(())
@@ -404,10 +408,13 @@ fn auth(
     let mut entries =
         credentials::load(&absolute).map_err(|e| DevCodeError::Config(e.to_string()))?;
     match action {
-        cli::AuthCommand::List => Ok(entries
-            .keys()
-            .map(|name| format!("{} stored", name))
-            .collect()),
+        cli::AuthCommand::List => {
+            let configured = resolve_config(root, cli)
+                .ok()
+                .and_then(|c| c.provider)
+                .and_then(|p| p.connector);
+            Ok(credentials::account_lines(&entries, configured.as_deref()))
+        }
         cli::AuthCommand::Logout { name } => {
             if entries.remove(name).is_some() {
                 credentials::save(&absolute, &entries)
@@ -422,7 +429,7 @@ fn auth(
                 .and_then(|p| p.connector);
             let name = name
                 .clone()
-                .or_else(|| (cli.provider.as_deref() == Some("nim")).then(|| "nim".to_string()))
+                .or_else(|| cli.provider.clone())
                 .or(configured)
                 .ok_or_else(|| DevCodeError::Config("connector name required".into()))?;
             let stdin = std::io::stdin();

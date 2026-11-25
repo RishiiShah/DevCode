@@ -130,7 +130,8 @@ fn init(app: &mut App, cmds: &mpsc::Sender<Cmd>, provider: &str, _cli: &Cli) {
     let test_command = app::detect_test_command(&root);
     let Some(text) = app::init_template(provider, test_command) else {
         app.items.push(Item::Error(format!(
-            "unknown provider '{provider}'; use nim or gemini"
+            "unknown provider '{provider}'; choose one of: {}",
+            crate::config::PRESETS.map(|p| p.name).join(", ")
         )));
         return;
     };
