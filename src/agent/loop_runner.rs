@@ -191,6 +191,8 @@ fn run_loop(
     let mut verification = None;
     let mut no_progress = None;
     let mut seen = std::collections::HashMap::<(String, String), usize>::new();
+    let mut last_tool_fingerprint: Option<(String, String, String)> = None;
+    let mut identical_tool_streak = 0usize;
 
     let mut messages = vec![Message::user(initial_user_message)];
     let mut steps = 0;
@@ -424,7 +426,7 @@ fn run_loop(
                 preview: preview_lines(&observation),
             });
             output_bytes += observation.len();
-            messages.push(Message::tool(observation, &call.id));
+            messages.push(Message::tool(observation.clone(), &call.id));
             if let Some((root, config)) = context {
                 let state = crate::agent::session::session_state(tools)?;
                 if call.name == "run_command" {
@@ -466,6 +468,23 @@ fn run_loop(
                     }
                 }
             }
+            if tool_ok && matches!(call.name.as_str(), "read_file" | "glob" | "grep") {
+                let fingerprint = (call.name.clone(), call.arguments.clone(), observation);
+                if last_tool_fingerprint.as_ref() == Some(&fingerprint) {
+                    identical_tool_streak += 1;
+                } else {
+                    identical_tool_streak = 1;
+                    last_tool_fingerprint = Some(fingerprint);
+                }
+                if identical_tool_streak >= 3 {
+                    let label = format!("{} {}", call.name, call_summary(&call.arguments));
+                    no_progress = Some((label.trim().to_string(), identical_tool_streak));
+                    break 'agent ExitReason::NoProgress;
+                }
+            } else {
+                last_tool_fingerprint = None;
+                identical_tool_streak = 0;
+            }
         }
 
         if limits.trace {
@@ -497,7 +516,10 @@ fn run_loop(
         // Context compaction check if context_window limit is set
         if let Some(window) = limits.context_window {
             if crate::discipline::compaction::should_compact(
-                total_input_tokens + total_output_tokens,
+                response
+                    .usage
+                    .input_tokens
+                    .saturating_add(response.usage.output_tokens),
                 window,
             ) {
                 let state = crate::agent::session::session_state(tools)?;
