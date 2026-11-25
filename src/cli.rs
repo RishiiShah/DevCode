@@ -1,6 +1,17 @@
 pub use crate::profile::Profile;
 use clap::{Parser, Subcommand};
 
+fn parse_provider_preset(name: &str) -> Result<String, String> {
+    if crate::config::preset(name).is_some() {
+        Ok(name.to_owned())
+    } else {
+        Err(format!(
+            "unknown provider '{name}'; choose one of: {}",
+            crate::config::PRESETS.map(|p| p.name).join(", ")
+        ))
+    }
+}
+
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 #[command(
     name = "devcode",
@@ -12,7 +23,8 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = Profile::Build)]
     pub profile: Profile,
 
-    #[arg(long, value_parser = ["nim"])]
+    /// Startup provider preset (`nim`, `gemini`). Fills connector, base URL, and key env.
+    #[arg(long, value_parser = parse_provider_preset)]
     pub provider: Option<String>,
 
     /// Automatically approve proposed file edits
@@ -65,9 +77,10 @@ pub enum AuthCommand {
 
 impl Cli {
     pub fn apply_provider_preset(&self, config: &mut crate::config::Config) {
-        if self.provider.as_deref() == Some("nim") {
-            if let Some(provider) = &mut config.provider {
-                provider.apply_nim_preset();
+        if let Some(name) = self.provider.as_deref() {
+            match &mut config.provider {
+                Some(provider) => provider.apply_named_preset(name),
+                None => config.provider = crate::config::provider_from_preset(name),
             }
         }
         if let Some(provider) = &mut config.provider {

@@ -1,3 +1,4 @@
+use clap::Parser;
 use devcode::agent::ScriptedModel;
 use devcode::config::{preset, Config, ProviderConfig, ProviderKind};
 use devcode::{Profile, Session};
@@ -80,4 +81,20 @@ fn switching_provider_model_and_effort() {
     assert!(empty.set_effort(Some("low")).is_err());
     empty.set_provider("gemini").unwrap();
     assert!(empty.has_provider());
+
+    // CLI --provider applies any preset, not only nim.
+    let cli = devcode::Cli::parse_from(["devcode", "--provider", "gemini"]);
+    let mut cfg = Config {
+        provider: Some(provider("nim", preset("nim").unwrap().base_url)),
+        ..Default::default()
+    };
+    // Keep a custom model across the CLI switch.
+    if let Some(p) = &mut cfg.provider {
+        p.model = "my-custom-model".into();
+    }
+    cli.apply_provider_preset(&mut cfg);
+    let p = cfg.provider.unwrap();
+    assert_eq!(p.connector.as_deref(), Some("gemini"));
+    assert_eq!(p.model, "my-custom-model");
+    assert_eq!(p.api_key_env, "GEMINI_API_KEY");
 }

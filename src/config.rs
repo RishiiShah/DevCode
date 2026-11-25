@@ -124,6 +124,55 @@ impl std::error::Error for ConfigError {
     }
 }
 
+pub fn provider_from_preset(name: &str) -> Option<ProviderConfig> {
+    let preset = preset(name)?;
+    Some(ProviderConfig {
+        kind: ProviderKind::OpenaiCompat,
+        base_url: preset.base_url.into(),
+        api_key_env: preset.api_key_env.into(),
+        connector: Some(preset.name.into()),
+        model: preset.default_model.into(),
+        context_window: 32_000,
+        max_rpm: None,
+        extra_body: Default::default(),
+    })
+}
+
+/// Merges project config, user-global provider, and the nim preset default.
+pub fn resolve_config(root: &Path, cli: &crate::cli::Cli) -> Result<Config, ConfigError> {
+    let settings_dir = crate::credentials::config_dir().map_err(settings_io_error)?;
+    resolve_config_at(root, cli, &settings_dir)
+}
+
+pub fn resolve_config_at(
+    root: &Path,
+    cli: &crate::cli::Cli,
+    settings_dir: &Path,
+) -> Result<Config, ConfigError> {
+    let mut config = load_config(root)?;
+    if config.provider.is_none() {
+        let settings = crate::settings::load_user_settings(settings_dir).map_err(|e| match e {
+            crate::settings::SettingsError::Io { path, source } => ConfigError::Io { path, source },
+            crate::settings::SettingsError::Parse(source) => ConfigError::Parse(source),
+        })?;
+        if let Some(p) = settings.resolved_provider() {
+            config.provider = Some(p);
+        }
+    }
+    if config.provider.is_none() {
+        config.provider = provider_from_preset("nim");
+    }
+    cli.apply_provider_preset(&mut config);
+    Ok(config)
+}
+
+fn settings_io_error(e: std::io::Error) -> ConfigError {
+    ConfigError::Io {
+        path: PathBuf::from("settings"),
+        source: e,
+    }
+}
+
 pub fn load_config(root: &Path) -> Result<Config, ConfigError> {
     let config_path = root.join(".devcode.json");
     let contents = match fs::read_to_string(&config_path) {
@@ -183,8 +232,9 @@ pub const PRESETS: [Preset; 2] = [
     Preset {
         name: "gemini",
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-        api_key_env: "",
-        default_model: "gemini-3.8-flash",
+        api_key_env: "GEMINI_API_KEY",
+        // Prefer a catalog id that answers under load; gemini-3.8-flash often 503'd in RES-013.
+        default_model: "gemini-3-flash-preview",
     },
 ];
 
@@ -242,16 +292,27 @@ impl ProviderConfig {
             || self.base_url.contains("generativelanguage.googleapis.com")
     }
 
+    /// Apply a named preset's connector, URL, and key env. Keeps a custom model unless
+    /// empty or still set to another preset's default (so `--provider gemini` after the
+    /// nim fallback does not keep a NIM model id).
+    pub fn apply_named_preset(&mut self, name: &str) {
+        let Some(p) = preset(name) else {
+            return;
+        };
+        let replace_model = self.model.is_empty()
+            || PRESETS
+                .iter()
+                .any(|other| other.name != p.name && other.default_model == self.model);
+        self.connector = Some(p.name.into());
+        self.base_url = p.base_url.into();
+        self.api_key_env = p.api_key_env.into();
+        if replace_model {
+            self.model = p.default_model.into();
+        }
+    }
+
     pub fn apply_nim_preset(&mut self) {
-        if self.connector.is_none() {
-            self.connector = Some("nim".into());
-        }
-        if self.base_url.is_empty() {
-            self.base_url = "https://integrate.api.nvidia.com/v1".into();
-        }
-        if self.api_key_env.is_empty() {
-            self.api_key_env = "NVIDIA_API_KEY".into();
-        }
+        self.apply_named_preset("nim");
     }
 }
 

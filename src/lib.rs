@@ -8,15 +8,17 @@ pub mod gate;
 pub mod guard;
 pub mod manifest;
 pub mod profile;
+mod settings;
 pub mod tools;
 pub mod tui;
 
 pub use cli::{Cli, Command};
 pub use config::{
-    default_test_globs, load_config, parse_config, Config, ConfigError, SandboxConfig,
-    VerificationConfig,
+    default_test_globs, load_config, parse_config, provider_from_preset, resolve_config,
+    resolve_config_at, Config, ConfigError, SandboxConfig, VerificationConfig,
 };
 pub use profile::{handle_slash_command, Profile};
+pub use settings::{load_user_settings, save_user_settings, UserSettings};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DevCodeError {
@@ -87,6 +89,17 @@ impl Session {
     }
     pub fn has_provider(&self) -> bool {
         self.config.provider.is_some()
+    }
+    /// First-run note when a provider is configured but no API key is available.
+    pub fn startup_note(&self) -> Option<String> {
+        let provider = self.config.provider.as_ref()?;
+        if build_model(provider.clone()).is_ok() {
+            return None;
+        }
+        let name = provider.connector.as_deref().unwrap_or("nim");
+        Some(format!(
+            "No API key for {name}. Run /connect (or: devcode auth login {name})."
+        ))
     }
     pub fn provider_label(&self) -> String {
         match &self.config.provider {
@@ -177,7 +190,17 @@ impl Session {
             // Provider-specific options such as reasoning_effort do not carry over.
             extra_body: Default::default(),
         };
-        Ok(self.apply_provider(provider))
+        let warning = self.apply_provider(provider.clone());
+        if let Ok(dir) = credentials::config_dir() {
+            if let Err(e) = crate::settings::persist_provider(&dir, &provider) {
+                let msg = format!("could not save default provider: {e}");
+                return Ok(Some(match warning {
+                    Some(w) => format!("{w}; {msg}"),
+                    None => msg,
+                }));
+            }
+        }
+        Ok(warning)
     }
     /// Sets or clears reasoning effort (low, medium, high). Session only; Gemini endpoint only.
     pub fn set_effort(&mut self, level: Option<&str>) -> Result<Option<String>, DevCodeError> {
@@ -299,8 +322,7 @@ fn load_provider(
     root: &std::path::Path,
     cli: &Cli,
 ) -> Result<(Config, Box<dyn agent::Model>), DevCodeError> {
-    let mut config = load_config(root).map_err(|e| DevCodeError::Config(e.to_string()))?;
-    cli.apply_provider_preset(&mut config);
+    let config = resolve_config(root, cli).map_err(|e| DevCodeError::Config(e.to_string()))?;
     let model = config
         .provider
         .clone()
@@ -330,8 +352,7 @@ pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
                 other => DevCodeError::Config(other.to_string()),
             });
     }
-    let mut config = load_config(&root).map_err(|e| DevCodeError::Config(e.to_string()))?;
-    cli.apply_provider_preset(&mut config);
+    let config = resolve_config(&root, &cli).map_err(|e| DevCodeError::Config(e.to_string()))?;
     let model = match config
         .provider
         .clone()
@@ -395,7 +416,7 @@ fn auth(
             Ok(Vec::new())
         }
         cli::AuthCommand::Login { name, with_stdin } => {
-            let configured = load_config(root)
+            let configured = resolve_config(root, cli)
                 .map_err(|e| DevCodeError::Config(e.to_string()))?
                 .provider
                 .and_then(|p| p.connector);

@@ -1,6 +1,8 @@
 use devcode::agent::model::{Model, ModelError, Request, ToolSchema};
 use devcode::agent::openai_compat::OpenAiCompat;
-use devcode::config::{parse_config, ProviderConfig, ProviderKind};
+use devcode::config::{
+    parse_config, preset, provider_from_preset, Config, ProviderConfig, ProviderKind,
+};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener};
 use std::sync::{Arc, Mutex};
@@ -220,6 +222,33 @@ fn nim_preset_fills_missing_fields() {
     let provider = config.provider.unwrap();
     assert_eq!(provider.base_url, "https://integrate.api.nvidia.com/v1");
     assert_eq!(provider.api_key_env, "NVIDIA_API_KEY");
+    assert_eq!(provider.connector.as_deref(), Some("nim"));
+    assert_eq!(provider.model, "m");
+}
+
+#[test]
+fn gemini_cli_preset_switches_from_nim_defaults() {
+    use clap::Parser;
+    let cli = devcode::Cli::parse_from(["devcode", "--provider", "gemini"]);
+    let mut config = Config {
+        provider: provider_from_preset("nim"),
+        ..Default::default()
+    };
+    cli.apply_provider_preset(&mut config);
+    let provider = config.provider.unwrap();
+    assert_eq!(
+        provider.base_url,
+        "https://generativelanguage.googleapis.com/v1beta/openai"
+    );
+    assert_eq!(provider.api_key_env, "GEMINI_API_KEY");
+    assert_eq!(provider.connector.as_deref(), Some("gemini"));
+    assert_eq!(provider.model, preset("gemini").unwrap().default_model);
+}
+
+#[test]
+fn unknown_cli_provider_is_rejected() {
+    use clap::Parser;
+    assert!(devcode::Cli::try_parse_from(["devcode", "--provider", "nope"]).is_err());
 }
 #[test]
 fn rejects_key_value_in_config() {
