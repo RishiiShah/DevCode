@@ -68,6 +68,9 @@ pub enum AuthCommand {
         name: Option<String>,
         #[arg(long)]
         with_stdin: bool,
+        /// Paste-code Google OAuth. Only `gemini` is supported.
+        #[arg(long)]
+        oauth: bool,
     },
     /// List stored connector names
     List,

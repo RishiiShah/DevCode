@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod approval;
+pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod credentials;
@@ -422,7 +423,11 @@ fn auth(
             }
             Ok(Vec::new())
         }
-        cli::AuthCommand::Login { name, with_stdin } => {
+        cli::AuthCommand::Login {
+            name,
+            with_stdin,
+            oauth,
+        } => {
             let configured = resolve_config(root, cli)
                 .map_err(|e| DevCodeError::Config(e.to_string()))?
                 .provider
@@ -432,6 +437,47 @@ fn auth(
                 .or_else(|| cli.provider.clone())
                 .or(configured)
                 .ok_or_else(|| DevCodeError::Config("connector name required".into()))?;
+            if *oauth && name != "gemini" {
+                return Err(DevCodeError::Config(
+                    "oauth login is only supported for gemini".into(),
+                ));
+            }
+            if *oauth && name == "gemini" {
+                let pkce =
+                    auth::generate_pkce().map_err(|e| DevCodeError::Config(e.to_string()))?;
+                eprintln!(
+                    "Visit this URL, then paste the authorization code:\n{}",
+                    auth::authorize_url(&pkce)
+                );
+                let stdin = std::io::stdin();
+                let code = if *with_stdin {
+                    let mut code = String::new();
+                    stdin
+                        .lock()
+                        .read_line(&mut code)
+                        .map_err(|e| DevCodeError::Config(e.to_string()))?;
+                    code.trim_end_matches(['\r', '\n']).to_string()
+                } else if stdin.is_terminal() {
+                    let mut code = String::new();
+                    stdin
+                        .lock()
+                        .read_line(&mut code)
+                        .map_err(|e| DevCodeError::Config(e.to_string()))?;
+                    code.trim_end_matches(['\r', '\n']).to_string()
+                } else {
+                    return Err(DevCodeError::Config(
+                        "use --with-stdin when no TTY is available".into(),
+                    ));
+                };
+                if code.is_empty() {
+                    return Err(DevCodeError::Config(
+                        "authorization code cannot be empty".into(),
+                    ));
+                }
+                auth::login_gemini(&absolute, &code, auth::DEFAULT_TOKEN_URL, &pkce)
+                    .map_err(DevCodeError::Config)?;
+                return Ok(vec!["saved google access token for gemini (not refreshed; gemini OpenAI endpoint may require an API key)".into()]);
+            }
             let stdin = std::io::stdin();
             let key = if *with_stdin {
                 let mut key = String::new();
