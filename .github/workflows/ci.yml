@@ -32,4 +32,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
+        env:
+          # Never let a developer/CI auto keyring clobber the host store during tests.
+          DEVCODE_CREDENTIALS_STORE: file
         run: cargo test

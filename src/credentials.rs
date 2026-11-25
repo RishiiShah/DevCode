@@ -194,10 +194,11 @@ fn save_with(
 ) -> io::Result<()> {
     let payload = encode_entries(entries)?;
     match blob.set(&payload) {
-        Ok(()) => {
-            let _ = fs::remove_file(dir.join("credentials.json"));
-            Ok(())
-        }
+        Ok(()) => match fs::remove_file(dir.join("credentials.json")) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        },
         Err(err) if is_keyring_unavailable(&err) => save_file(dir, entries),
         Err(err) => Err(err),
     }

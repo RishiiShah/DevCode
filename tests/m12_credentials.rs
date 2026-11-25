@@ -2,6 +2,10 @@ use devcode::credentials::{account_lines, load, save};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 
+fn force_file_store() {
+    std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
+}
+
 #[test]
 fn account_lines_mark_active_and_sources() {
     let mut entries = BTreeMap::new();
@@ -31,6 +35,7 @@ fn account_lines_mark_active_and_sources() {
 
 #[test]
 fn storage_modes_atomic_and_insecure_refusal() {
+    force_file_store();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config");
     let mut values = BTreeMap::new();
@@ -83,6 +88,7 @@ fn auth(
     let mut child = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root)
         .env("DEVCODE_CONFIG_DIR", dir)
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -101,6 +107,7 @@ fn auth(
 }
 #[test]
 fn login_list_logout_and_reject_argument() {
+    force_file_store();
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let dir = storage.path().join("config");
@@ -151,6 +158,7 @@ fn login_list_logout_and_reject_argument() {
 }
 #[test]
 fn auth_default_connector_and_no_tty_refusal() {
+    force_file_store();
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let dir = storage.path().join("config");
@@ -180,6 +188,7 @@ fn reject_credentials_inside_workspace() {
 }
 #[test]
 fn inaccessible_file_reports_fix_via_cli() {
+    force_file_store();
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let dir = storage.path().join("config");

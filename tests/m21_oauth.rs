@@ -133,6 +133,7 @@ fn oauth_rejects_non_gemini() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root.path())
         .env("DEVCODE_CONFIG_DIR", &dir)
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .args(["auth", "login", "nim", "--oauth", "--with-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

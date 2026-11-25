@@ -4,6 +4,10 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+fn force_file_store() {
+    std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
+}
+
 fn pty() -> (std::fs::File, std::fs::File) {
     let (mut master, mut slave) = (0, 0);
     // SAFETY: pointers reference valid descriptors; null optional arguments are allowed by openpty.
@@ -56,10 +60,12 @@ fn typed_ahead_is_flushed_before_hidden_prompt() {
     let storage = tempfile::tempdir().unwrap();
     let config = storage.path().join("config");
     let (mut master, slave) = pty();
+    force_file_store();
     master.write_all(b"queued-fake-key\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root.path())
         .env("DEVCODE_CONFIG_DIR", &config)
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .args(["auth", "login", "nim"])
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
@@ -87,6 +93,7 @@ fn non_tty_connect_refused_and_missing_model_explained() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root.path())
         .env("DEVCODE_CONFIG_DIR", &config)
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .env_remove("M13_MISSING_TEST_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -110,6 +117,7 @@ fn non_tty_connect_refused_and_missing_model_explained() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root.path())
         .env("DEVCODE_CONFIG_DIR", &config)
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -131,6 +139,7 @@ fn help_warns_not_to_paste_with_command() {
     let out = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root.path())
         .env("DEVCODE_CONFIG_DIR", config.path())
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .args(["auth", "login", "--help"])
         .output()
         .unwrap();
@@ -139,6 +148,7 @@ fn help_warns_not_to_paste_with_command() {
 }
 #[test]
 fn connections_lists_names_only() {
+    force_file_store();
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let config = storage.path().join("config");
@@ -153,6 +163,7 @@ fn connections_lists_names_only() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root.path())
         .env("DEVCODE_CONFIG_DIR", &config)
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -219,6 +230,7 @@ fn tty_connect_rebuilds_provider_for_next_request() {
         )
         .unwrap();
     });
+    force_file_store();
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let config = storage.path().join("config");
@@ -227,6 +239,7 @@ fn tty_connect_rebuilds_provider_for_next_request() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root.path())
         .env("DEVCODE_CONFIG_DIR", &config)
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .env_remove("M13_MISSING_TEST_KEY")
         .arg("--trace")
         .arg("--plain")
