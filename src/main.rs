@@ -6,6 +6,105 @@ use devcode::{
 };
 use std::io;
 
+/// Plain REPL slash commands for provider switching (same Session API as the TUI).
+fn handle_plain_slash(line: &str, session: &mut devcode::Session) -> bool {
+    let mut words = line.split_whitespace();
+    let Some(cmd) = words.next() else {
+        return false;
+    };
+    match cmd {
+        "/connections" if words.next().is_none() => {
+            match session.connections() {
+                Ok(lines) => {
+                    for line in lines {
+                        println!("{}", line);
+                    }
+                }
+                Err(e) => eprintln!("{}", e),
+            }
+            true
+        }
+        "/connect" => {
+            let name = words.next();
+            if words.next().is_some() {
+                eprintln!("usage: /connect [NAME]");
+            } else if let Err(e) = session.connect(name) {
+                eprintln!("{}", e);
+            }
+            true
+        }
+        "/provider" => {
+            match words.next() {
+                None => {
+                    let names = devcode::config::PRESETS
+                        .iter()
+                        .map(|p| p.name)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("providers: {names}");
+                    println!("current: {}", session.provider_label());
+                }
+                Some(name) if words.next().is_none() => match session.set_provider(name) {
+                    Ok(Some(warning)) => eprintln!("{warning}"),
+                    Ok(None) => println!("{}", session.provider_label()),
+                    Err(e) => eprintln!("{e}"),
+                },
+                _ => eprintln!("usage: /provider [NAME]"),
+            }
+            true
+        }
+        "/model" => {
+            match words.next() {
+                None => match session.list_models() {
+                    Ok(models) if models.is_empty() => {
+                        println!("current: {}", session.provider_label());
+                    }
+                    Ok(models) => {
+                        for id in models {
+                            println!("{id}");
+                        }
+                        println!("current: {}", session.provider_label());
+                    }
+                    Err(e) => eprintln!("{e}"),
+                },
+                Some(id) if words.next().is_none() => match session.set_model(id) {
+                    Ok(Some(warning)) => eprintln!("{warning}"),
+                    Ok(None) => println!("{}", session.provider_label()),
+                    Err(e) => eprintln!("{e}"),
+                },
+                _ => eprintln!("usage: /model [ID]"),
+            }
+            true
+        }
+        "/effort" => {
+            match words.next() {
+                None => {
+                    let levels = session.effort_levels();
+                    if levels.is_empty() {
+                        println!("reasoning effort is not available for this provider/model");
+                    } else {
+                        println!("effort levels: {} (or default)", levels.join(", "));
+                        println!("current: {}", session.provider_label());
+                    }
+                }
+                Some("default") if words.next().is_none() => match session.set_effort(None) {
+                    Ok(Some(warning)) => eprintln!("{warning}"),
+                    Ok(None) => println!("{}", session.provider_label()),
+                    Err(e) => eprintln!("{e}"),
+                },
+                Some(level) if words.next().is_none() => match session.set_effort(Some(level)) {
+                    Ok(Some(warning)) => eprintln!("{warning}"),
+                    Ok(None) => println!("{}", session.provider_label()),
+                    Err(e) => eprintln!("{e}"),
+                },
+                _ => eprintln!("usage: /effort [LEVEL|default]"),
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 fn print_result(result: &LoopResult) {
     if result.exit_reason == ExitReason::Completed {
         if let Some(message) = result
@@ -84,31 +183,8 @@ fn main() {
                     {
                         continue;
                     }
-                    let mut words = line.split_whitespace();
-                    match words.next() {
-                        Some("/connections") if words.next().is_none() => {
-                            match session.connections() {
-                                Ok(lines) => {
-                                    for line in lines {
-                                        println!("{}", line);
-                                    }
-                                }
-                                Err(e) => eprintln!("{}", e),
-                            }
-                            continue;
-                        }
-                        Some("/connect") => {
-                            let name = words.next();
-                            if words.next().is_some() {
-                                eprintln!("usage: /connect [NAME]");
-                                continue;
-                            }
-                            if let Err(e) = session.connect(name) {
-                                eprintln!("{}", e);
-                            }
-                            continue;
-                        }
-                        _ => {}
+                    if handle_plain_slash(&line, &mut session) {
+                        continue;
                     }
                     match session.prompt(&line) {
                         Ok(result) => print_result(&result),

@@ -3,6 +3,7 @@
 //! The UI thread owns the terminal. A worker thread owns the `Session`. Approval questions
 //! flow worker -> UI as text, answers flow UI -> worker as lines (see `worker`).
 pub mod app;
+mod fuzzy;
 pub mod markdown;
 pub mod view;
 pub mod worker;
@@ -10,7 +11,10 @@ pub mod worker;
 use crate::approval::ApprovalPrompt;
 use crate::{Cli, DevCodeError};
 use app::{Action, App};
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -34,13 +38,26 @@ pub fn run(cli: Cli) -> Result<(), DevCodeError> {
         cli.yes,
     );
     let session = crate::open_session(&cli, prompt)?;
-    let mut app = App::new(session.profile, session.provider_label());
+    let prefetch = session.has_provider();
+    let mut app = App::new(
+        session.profile,
+        session.provider_label(),
+        session.startup_note(),
+    );
     let _worker = worker::spawn(session, cli.clone(), cmd_rx, ev_tx);
+    // Same as peers: load the model catalog as soon as a provider is configured.
+    if prefetch {
+        let _ = cmd_tx.send(Cmd::ListModels);
+    }
 
     let mut terminal = ratatui::init();
-    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
     let result = event_loop(&mut terminal, &mut app, &cmd_tx, &ans_tx, &ev_rx, &cli);
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture
+    );
     ratatui::restore();
     result.map_err(|e| DevCodeError::Config(e.to_string()))
 }
@@ -66,6 +83,14 @@ fn event_loop(
             Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
             Event::Paste(text) => {
                 app.on_paste(&text);
+                Vec::new()
+            }
+            Event::Mouse(mouse) if app.modal.is_none() => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => app.on_mouse_scroll(true),
+                    MouseEventKind::ScrollDown => app.on_mouse_scroll(false),
+                    _ => {}
+                }
                 Vec::new()
             }
             _ => Vec::new(),

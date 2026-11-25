@@ -134,6 +134,12 @@ fn switched(
     });
 }
 
+/// After connect / provider switch / reload, fetch the catalog so `/model` is ready
+/// (same pattern as peer TUIs that populate a model picker on auth).
+fn prefetch_models(session: &Session, events: &Sender<Ev>) {
+    let _ = events.send(Ev::Models(session.list_models().map_err(|e| e.to_string())));
+}
+
 fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
     match cmd {
         Cmd::Prompt(text) => {
@@ -146,10 +152,15 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
         Cmd::SetProfile(profile) => session.profile = profile,
         Cmd::Connect { name, key } => {
             let result = session.connect_with(name.as_deref(), true, move || Ok(key));
-            let _ = events.send(match result {
-                Ok(()) => Ev::Provider(session.provider_label()),
-                Err(e) => Ev::Failed(e.to_string()),
-            });
+            match result {
+                Ok(()) => {
+                    let _ = events.send(Ev::Provider(session.provider_label()));
+                    prefetch_models(session, events);
+                }
+                Err(e) => {
+                    let _ = events.send(Ev::Failed(e.to_string()));
+                }
+            }
         }
         Cmd::Connections => {
             let _ = events.send(match session.connections() {
@@ -158,14 +169,17 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
                 Err(e) => Ev::Failed(e.to_string()),
             });
         }
-        Cmd::Reload => {
-            let _ = events.send(match session.reload(cli) {
-                Ok(()) => Ev::Provider(session.provider_label()),
-                Err(e) => Ev::Failed(e.to_string()),
-            });
-        }
+        Cmd::Reload => match session.reload(cli) {
+            Ok(()) => {
+                let _ = events.send(Ev::Provider(session.provider_label()));
+                prefetch_models(session, events);
+            }
+            Err(e) => {
+                let _ = events.send(Ev::Failed(e.to_string()));
+            }
+        },
         Cmd::ListModels => {
-            let _ = events.send(Ev::Models(session.list_models().map_err(|e| e.to_string())));
+            prefetch_models(session, events);
         }
         Cmd::ListEfforts => {
             let _ = events.send(Ev::Efforts(session.effort_levels()));
@@ -175,19 +189,27 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
             switched(session, result, events);
         }
         Cmd::SetProvider(name) => {
-            let result = session.set_provider(&name);
-            switched(session, result, events);
-            // A switch without a stored key works until the first request; say so now.
-            let stored = session.connections().unwrap_or_default();
-            let has_key = stored
-                .iter()
-                .any(|line| line.starts_with(&format!("{name} ")));
-            let env_set = crate::config::preset(&name)
-                .is_some_and(|p| !p.api_key_env.is_empty() && std::env::var(p.api_key_env).is_ok());
-            if !has_key && !env_set {
-                let _ = events.send(Ev::Info(vec![format!(
-                    "no stored key for {name}; run /connect {name}"
-                )]));
+            match session.set_provider(&name) {
+                Ok(_) => {
+                    let _ = events.send(Ev::Provider(session.provider_label()));
+                    // A switch without a stored key works until the first request; say so now.
+                    let stored = session.connections().unwrap_or_default();
+                    let has_key = stored
+                        .iter()
+                        .any(|line| line.starts_with(&format!("{name} ")));
+                    let env_set = crate::config::preset(&name).is_some_and(|p| {
+                        !p.api_key_env.is_empty() && std::env::var(p.api_key_env).is_ok()
+                    });
+                    if !has_key && !env_set {
+                        let _ = events.send(Ev::Info(vec![format!(
+                            "no stored key for {name}; run /connect {name}"
+                        )]));
+                    }
+                    prefetch_models(session, events);
+                }
+                Err(e) => {
+                    let _ = events.send(Ev::Failed(e.to_string()));
+                }
             }
         }
         Cmd::SetEffort(level) => {
