@@ -1,10 +1,11 @@
-use std::fs::File;
-use std::io::{self, Read};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-
-use crate::credentials;
 
 pub const CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
@@ -12,6 +13,7 @@ pub const CLIENT_SECRET: &str = "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";
 pub const REDIRECT_URI: &str = "https://codeassist.google.com/authcode";
 pub const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const DEFAULT_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub const OAUTH_FILE: &str = "oauth-gemini.json";
 
 const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
@@ -23,6 +25,22 @@ pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
     pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleTokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct StoredOAuth {
+    access_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<u64>,
 }
 
 fn base64url_nopad(bytes: &[u8]) -> String {
@@ -50,7 +68,7 @@ fn base64url_nopad(bytes: &[u8]) -> String {
 }
 
 fn random_bytes(n: usize) -> io::Result<Vec<u8>> {
-    let mut file = File::open("/dev/urandom")?;
+    let mut file = std::fs::File::open("/dev/urandom")?;
     let mut bytes = vec![0; n];
     file.read_exact(&mut bytes)?;
     Ok(bytes)
@@ -120,7 +138,7 @@ pub fn authorize_url(pkce: &Pkce) -> String {
     format!("{AUTHORIZE_URL}?{query}")
 }
 
-pub fn exchange_code(token_url: &str, code: &str, pkce: &Pkce) -> Result<String, String> {
+pub fn exchange_code(token_url: &str, code: &str, pkce: &Pkce) -> Result<GoogleTokens, String> {
     let response = ureq::post(token_url).send_form(&[
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -137,10 +155,25 @@ pub fn exchange_code(token_url: &str, code: &str, pkce: &Pkce) -> Result<String,
     let value: serde_json::Value = response
         .into_json()
         .map_err(|e| format!("token response: {e}"))?;
-    match value.get("access_token").and_then(|v| v.as_str()) {
-        Some(token) if !token.is_empty() => Ok(token.to_owned()),
-        _ => Err("token response missing access_token".into()),
-    }
+    let access_token = match value.get("access_token").and_then(|v| v.as_str()) {
+        Some(token) if !token.is_empty() => token.to_owned(),
+        _ => return Err("token response missing access_token".into()),
+    };
+    let refresh_token = value
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let expires_in = value.get("expires_in").and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+            .or_else(|| v.as_str()?.parse().ok())
+    });
+    Ok(GoogleTokens {
+        access_token,
+        refresh_token,
+        expires_in,
+    })
 }
 
 fn http_error(code: u16, response: ureq::Response) -> String {
@@ -161,10 +194,49 @@ fn http_error(code: u16, response: ureq::Response) -> String {
     }
 }
 
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn save_oauth_file(dir: &Path, tokens: &GoogleTokens) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    let stored = StoredOAuth {
+        access_token: tokens.access_token.clone(),
+        refresh_token: tokens.refresh_token.clone(),
+        expires_at: tokens
+            .expires_in
+            .map(|secs| now_secs().saturating_add(secs)),
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = dir.join(format!(".oauth-gemini-{}-{nonce}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
+        serde_json::to_writer(&mut file, &stored).map_err(io::Error::other)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&temp, dir.join(OAUTH_FILE))?;
+        fs::File::open(dir)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Exchange a paste-code and write `oauth-gemini.json`. Never touches `credentials.json`.
 pub fn login_gemini(dir: &Path, code: &str, token_url: &str, pkce: &Pkce) -> Result<(), String> {
-    let token = exchange_code(token_url, code, pkce)?;
-    let mut entries = credentials::load(dir).map_err(|e| e.to_string())?;
-    entries.insert("gemini".to_owned(), token);
-    credentials::save(dir, &entries).map_err(|e| e.to_string())?;
+    let tokens = exchange_code(token_url, code, pkce)?;
+    save_oauth_file(dir, &tokens).map_err(|e| e.to_string())?;
     Ok(())
 }

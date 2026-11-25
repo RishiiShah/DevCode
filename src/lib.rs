@@ -456,14 +456,21 @@ fn auth(
                         .lock()
                         .read_line(&mut code)
                         .map_err(|e| DevCodeError::Config(e.to_string()))?;
-                    code.trim_end_matches(['\r', '\n']).to_string()
+                    code.trim().to_string()
                 } else if stdin.is_terminal() {
+                    use std::os::fd::AsRawFd;
+                    // SAFETY: stdin fd; TCIFLUSH drops typed-ahead bytes before the paste prompt.
+                    if unsafe { libc::tcflush(stdin.as_raw_fd(), libc::TCIFLUSH) } != 0 {
+                        return Err(DevCodeError::Config(
+                            std::io::Error::last_os_error().to_string(),
+                        ));
+                    }
                     let mut code = String::new();
                     stdin
                         .lock()
                         .read_line(&mut code)
                         .map_err(|e| DevCodeError::Config(e.to_string()))?;
-                    code.trim_end_matches(['\r', '\n']).to_string()
+                    code.trim().to_string()
                 } else {
                     return Err(DevCodeError::Config(
                         "use --with-stdin when no TTY is available".into(),
@@ -476,7 +483,9 @@ fn auth(
                 }
                 auth::login_gemini(&absolute, &code, auth::DEFAULT_TOKEN_URL, &pkce)
                     .map_err(DevCodeError::Config)?;
-                return Ok(vec!["saved google access token for gemini (not refreshed; gemini OpenAI endpoint may require an API key)".into()]);
+                return Ok(vec![
+                    "saved google tokens to oauth-gemini.json (API key in credentials.json untouched; not used by openai_compat yet)".into(),
+                ]);
             }
             let stdin = std::io::stdin();
             let key = if *with_stdin {

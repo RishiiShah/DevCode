@@ -343,7 +343,7 @@ MVP harness M0–M13 is on main (CLI loop, guard, manifest/rollback, gate, appro
 | P10 | partial | Account rows stored\|env\|missing; connect persists; `openai` + `openrouter` presets; Gemini paste-code OAuth (access token only) | no refresh, device-code, or other-provider OAuth; no keyring or `auth switch`; Anthropic still partial |
 
 - [ ] **P10a** Native Anthropic Messages adapter — bar: OpenCode/pi (OAuth + always-stream + betas). **Landed (still partial):** `ProviderKind::Anthropic`, `src/agent/anthropic.rs`, preset `anthropic` (`ANTHROPIC_API_KEY`), fake-server tests `m20_anthropic` (7). Missing vs peers: OAuth, forced SSE stream path, beta headers, live keyed dogfood.
-- [ ] **P10b** OAuth / device-code login for at least one provider — bar: Codex / gemini-cli. **Landed (still partial):** paste-code Google OAuth for `gemini` (`src/auth.rs`, `auth login gemini --oauth`) stores an access token only. Fake-server tests `m21_oauth`. Missing vs peers: refresh, device-code, loopback redirect, other providers, keyring.
+- [ ] **P10b** OAuth / device-code login for at least one provider — bar: Codex / gemini-cli. **Landed (still partial):** paste-code Google OAuth for `gemini` (`src/auth.rs`, `auth login gemini --oauth`) writes `oauth-gemini.json` (access + refresh + expiry); leaves `credentials.json` API key alone. Fake-server tests `m21_oauth`. Missing vs peers: refresh-on-use, Code Assist host wiring, device-code, loopback redirect, other providers, keyring.
 - [ ] **P10c** OS keyring backend (optional file) — bar: Codex / gemini-cli HybridTokenStorage
 - [ ] **P10d** Multi-credential + `auth switch` — bar: OpenCode `auth switch`
 - [ ] **P10e** Decide env-vs-stored precedence vs pi (spec today: env wins)

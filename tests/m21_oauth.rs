@@ -1,4 +1,4 @@
-use devcode::auth::{login_gemini, Pkce};
+use devcode::auth::{login_gemini, Pkce, OAUTH_FILE};
 use devcode::credentials::{load, save};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -62,28 +62,34 @@ fn pkce() -> Pkce {
 }
 
 #[test]
-fn exchange_saves_access_token() {
+fn exchange_saves_oauth_file_keeps_api_key() {
     let (url, requests) = scripted_server(vec![(
         200,
-        r#"{"access_token":"ya29.test","refresh_token":"drop-me","expires_in":3600}"#.into(),
+        r#"{"access_token":"ya29.test","refresh_token":"refresh-keep","expires_in":3600}"#.into(),
     )]);
     let dir = tempfile::tempdir().unwrap();
     let mut existing = BTreeMap::new();
+    existing.insert("gemini".into(), "api-key-keep".into());
     existing.insert("nim".into(), "keep-me".into());
     save(dir.path(), &existing).unwrap();
     login_gemini(dir.path(), "auth-code-xyz", &url, &pkce()).unwrap();
     let creds = load(dir.path()).unwrap();
-    assert_eq!(creds.get("gemini").map(String::as_str), Some("ya29.test"));
+    assert_eq!(
+        creds.get("gemini").map(String::as_str),
+        Some("api-key-keep")
+    );
     assert_eq!(creds.get("nim").map(String::as_str), Some("keep-me"));
-    let raw = std::fs::read_to_string(dir.path().join("credentials.json")).unwrap();
-    assert!(!raw.contains("drop-me"));
-    assert!(!raw.contains("refresh_token"));
+    let oauth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(OAUTH_FILE)).unwrap())
+            .unwrap();
+    assert_eq!(oauth["access_token"], "ya29.test");
+    assert_eq!(oauth["refresh_token"], "refresh-keep");
+    assert!(oauth.get("expires_at").and_then(|v| v.as_u64()).is_some());
     let captured = requests.lock().unwrap();
     let body = String::from_utf8_lossy(&captured[0]);
     let form = body.split("\r\n\r\n").nth(1).unwrap();
     assert!(form.contains("auth-code-xyz"), "{form}");
     assert!(form.contains("verifier-test"), "{form}");
-    assert!(!form.contains("access_token"), "{form}");
     assert!(!form.contains("ya29.test"), "{form}");
 }
 
@@ -101,6 +107,7 @@ fn exchange_failure_preserves_existing() {
     );
     let creds = load(dir.path()).unwrap();
     assert_eq!(creds.get("gemini").map(String::as_str), Some("old-key"));
+    assert!(!dir.path().join(OAUTH_FILE).exists());
 }
 
 #[test]
@@ -150,4 +157,5 @@ fn oauth_rejects_non_gemini() {
         "{err}"
     );
     assert!(!dir.join("credentials.json").exists());
+    assert!(!dir.join(OAUTH_FILE).exists());
 }
