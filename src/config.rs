@@ -164,7 +164,41 @@ fn deserialize_env_name<'de, D: serde::Deserializer<'de>>(
     Ok(name)
 }
 
+/// Known providers for the UI. Models are not listed here; the picker asks the provider.
+pub struct Preset {
+    pub name: &'static str,
+    pub base_url: &'static str,
+    pub api_key_env: &'static str,
+    /// A model id that worked in a live run when this was written.
+    pub default_model: &'static str,
+}
+
+pub const PRESETS: [Preset; 2] = [
+    Preset {
+        name: "nim",
+        base_url: "https://integrate.api.nvidia.com/v1",
+        api_key_env: "NVIDIA_API_KEY",
+        default_model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    },
+    Preset {
+        name: "gemini",
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+        api_key_env: "",
+        default_model: "gemini-3.8-flash",
+    },
+];
+
+pub fn preset(name: &str) -> Option<&'static Preset> {
+    PRESETS.iter().find(|p| p.name == name)
+}
+
 impl ProviderConfig {
+    /// True when the backend takes `reasoning_effort` on chat completions (Gemini's endpoint).
+    pub fn supports_effort(&self) -> bool {
+        self.connector.as_deref() == Some("gemini")
+            || self.base_url.contains("generativelanguage.googleapis.com")
+    }
+
     pub fn apply_nim_preset(&mut self) {
         if self.connector.is_none() {
             self.connector = Some("nim".into());

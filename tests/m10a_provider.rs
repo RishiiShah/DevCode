@@ -57,7 +57,7 @@ fn scripted_server(responses: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<Vec<
                     name.eq_ignore_ascii_case("content-length")
                         .then(|| value.trim().parse().unwrap())
                 })
-                .unwrap();
+                .unwrap_or(0);
             data.resize(header_end + length, 0);
             stream.read_exact(&mut data[header_end..]).unwrap();
             recorded.lock().unwrap().push(data);
@@ -276,4 +276,27 @@ fn thought_signature_is_read_and_echoed_back() {
         json.pointer("/messages/1/tool_calls/0/extra_content/google/thought_signature"),
         Some(&serde_json::json!("sig-abc"))
     );
+}
+
+#[test]
+fn list_models_strips_gemini_prefix_sorts_and_dedupes() {
+    let reply = r#"{"data":[{"id":"models/gemini-b"},{"id":"gemini-a"},{"id":"gemini-b"}]}"#;
+    let (url, requests) = scripted_server(vec![(200, reply.into())]);
+    let ids = OpenAiCompat::new(config(url))
+        .unwrap()
+        .list_models()
+        .unwrap();
+    assert_eq!(ids, vec!["gemini-a", "gemini-b"]);
+    let sent = String::from_utf8_lossy(&requests.lock().unwrap()[0]).into_owned();
+    assert!(sent.starts_with("GET /models "), "{sent}");
+}
+
+#[test]
+fn list_models_reports_http_errors() {
+    let (url, _) = scripted_server(vec![(401, r#"{"error":"bad key"}"#.into())]);
+    let err = OpenAiCompat::new(config(url))
+        .unwrap()
+        .list_models()
+        .unwrap_err();
+    assert!(err.to_string().contains("HTTP 401"), "{err}");
 }

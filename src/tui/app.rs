@@ -41,7 +41,39 @@ pub enum Modal {
     ConfirmRollback {
         step: Option<usize>,
     },
+    /// Filterable list: models (fetched from the provider), providers, reasoning effort.
+    Picker {
+        kind: PickKind,
+        items: Vec<String>,
+        filter: String,
+        selected: usize,
+        loading: bool,
+    },
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickKind {
+    Model,
+    Provider,
+    Effort,
+}
+
+impl Modal {
+    /// Items matching the filter, case-insensitively. Empty for non-pickers.
+    pub fn visible(&self) -> Vec<&str> {
+        match self {
+            Modal::Picker { items, filter, .. } => {
+                let needle = filter.to_lowercase();
+                items
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|i| i.to_lowercase().contains(&needle))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// What the event loop must do after the app handled an input.
@@ -85,6 +117,9 @@ pub struct App {
 
 const HELP: &str = "Enter       send message or command
 /ask /plan /build   switch profile (ask and plan are read-only)
+/model [ID]         pick a model (listed by the provider) or set one
+/provider [NAME]    switch provider: nim or gemini (this session only)
+/effort [LEVEL]     reasoning effort: default, low, medium, high (gemini only)
 /connect [NAME]     store an API key (masked input)
 /connections        list stored connections
 /init [nim|gemini]  write .devcode.json for this folder
@@ -154,9 +189,36 @@ impl App {
                 }
             }
             Ev::Provider(label) => {
+                self.items.push(Item::Info(format!("now using {label}")));
                 self.provider = label;
-                self.items.push(Item::Info("provider ready".into()));
             }
+            Ev::Models(result) => match (&mut self.modal, result) {
+                (
+                    Some(Modal::Picker {
+                        kind: PickKind::Model,
+                        items,
+                        loading,
+                        ..
+                    }),
+                    Ok(list),
+                ) => {
+                    *items = list;
+                    *loading = false;
+                }
+                (
+                    Some(Modal::Picker {
+                        kind: PickKind::Model,
+                        ..
+                    }),
+                    Err(message),
+                ) => {
+                    self.modal = None;
+                    self.items.push(Item::Error(format!(
+                        "cannot list models: {message}. Use /model ID to set one directly."
+                    )));
+                }
+                _ => {}
+            },
         }
         self.scroll = 0;
     }
@@ -399,6 +461,68 @@ impl App {
                     Vec::new()
                 }
             },
+            Modal::Picker {
+                kind,
+                items,
+                mut filter,
+                mut selected,
+                loading,
+            } => {
+                let mut modal = Modal::Picker {
+                    kind,
+                    items,
+                    filter: filter.clone(),
+                    selected,
+                    loading,
+                };
+                let count = modal.visible().len();
+                match key.code {
+                    KeyCode::Esc => return Vec::new(),
+                    KeyCode::Enter => {
+                        let chosen = modal.visible().get(selected).map(|s| s.to_string());
+                        // Nothing matches: for models, use the typed text as an id.
+                        let chosen = chosen.or_else(|| {
+                            (kind == PickKind::Model && !filter.trim().is_empty())
+                                .then(|| filter.trim().to_string())
+                        });
+                        let Some(value) = chosen else {
+                            self.modal = Some(modal);
+                            return Vec::new();
+                        };
+                        return vec![Action::Send(match kind {
+                            PickKind::Model => Cmd::SetModel(value),
+                            PickKind::Provider => Cmd::SetProvider(value),
+                            PickKind::Effort => {
+                                Cmd::SetEffort((value != "default").then_some(value))
+                            }
+                        })];
+                    }
+                    KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Down => selected = (selected + 1).min(count.saturating_sub(1)),
+                    KeyCode::PageUp => selected = selected.saturating_sub(10),
+                    KeyCode::PageDown => selected = (selected + 10).min(count.saturating_sub(1)),
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        selected = 0;
+                    }
+                    KeyCode::Char(c) if !c.is_control() => {
+                        filter.push(c);
+                        selected = 0;
+                    }
+                    _ => {}
+                }
+                if let Modal::Picker {
+                    filter: f,
+                    selected: s,
+                    ..
+                } = &mut modal
+                {
+                    *f = filter;
+                    *s = selected;
+                }
+                self.modal = Some(modal);
+                Vec::new()
+            }
             Modal::Help => Vec::new(),
         }
     }
@@ -542,6 +666,12 @@ impl App {
                 Vec::new()
             }
             "connections" => vec![Action::Send(Cmd::Connections)],
+            "model" | "provider" | "effort" => {
+                if busy {
+                    return busy_block(&mut self.items);
+                }
+                self.pick(name, arg)
+            }
             "init" => {
                 if busy {
                     return busy_block(&mut self.items);
@@ -568,6 +698,51 @@ impl App {
             other => {
                 self.items
                     .push(Item::Error(format!("unknown command /{other}; try /help")));
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl App {
+    /// `/model`, `/provider`, `/effort`: apply an argument directly, or open the picker.
+    fn pick(&mut self, command: &str, arg: Option<&str>) -> Vec<Action> {
+        let picker = |kind, items: Vec<String>, loading| Modal::Picker {
+            kind,
+            items,
+            filter: String::new(),
+            selected: 0,
+            loading,
+        };
+        match (command, arg) {
+            ("model", Some(id)) => vec![Action::Send(Cmd::SetModel(id.to_string()))],
+            ("provider", Some(name)) => vec![Action::Send(Cmd::SetProvider(name.to_string()))],
+            ("effort", Some(level)) => vec![Action::Send(Cmd::SetEffort(
+                (level != "default").then(|| level.to_string()),
+            ))],
+            ("model", None) => {
+                if self.provider == "no provider" {
+                    self.items.push(Item::Error(
+                        "No provider yet. Run /provider nim or /provider gemini first.".into(),
+                    ));
+                    return Vec::new();
+                }
+                self.modal = Some(picker(PickKind::Model, Vec::new(), true));
+                vec![Action::Send(Cmd::ListModels)]
+            }
+            ("provider", None) => {
+                let names = crate::config::PRESETS
+                    .iter()
+                    .map(|p| p.name.to_string())
+                    .collect();
+                self.modal = Some(picker(PickKind::Provider, names, false));
+                Vec::new()
+            }
+            _ => {
+                let levels = ["default", "low", "medium", "high"]
+                    .map(String::from)
+                    .to_vec();
+                self.modal = Some(picker(PickKind::Effort, levels, false));
                 Vec::new()
             }
         }
@@ -624,19 +799,8 @@ fn hint_for(message: &str) -> String {
 
 /// `.devcode.json` for a provider preset, or None for an unknown name.
 pub fn init_template(provider: &str, test_command: Option<&str>) -> Option<String> {
-    let (connector, base_url, model) = match provider {
-        "nim" => (
-            "nim",
-            "https://integrate.api.nvidia.com/v1",
-            "nvidia/nemotron-3.5-super-vl-120b-a12b",
-        ),
-        "gemini" => (
-            "gemini",
-            "https://generativelanguage.googleapis.com/v1beta/openai",
-            "gemini-3.8-flash",
-        ),
-        _ => return None,
-    };
+    let preset = crate::config::preset(provider)?;
+    let (connector, base_url, model) = (preset.name, preset.base_url, preset.default_model);
     let mut value = serde_json::json!({
         "provider": {
             "kind": "openai_compat",
@@ -859,6 +1023,85 @@ mod tests {
         };
         assert!(!text.contains("model error: model error"));
         assert!(text.contains("\"connector\""));
+    }
+
+    fn picker(a: &App) -> &Modal {
+        a.modal.as_ref().expect("modal open")
+    }
+
+    #[test]
+    fn model_picker_loads_filters_and_selects() {
+        let mut a = app();
+        type_str(&mut a, "/model");
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(&actions[..], [Action::Send(Cmd::ListModels)]));
+        assert!(matches!(picker(&a), Modal::Picker { loading: true, .. }));
+        a.on_event(Ev::Models(Ok(vec![
+            "alpha".into(),
+            "beta-large".into(),
+            "beta-small".into(),
+        ])));
+        type_str(&mut a, "beta");
+        assert_eq!(picker(&a).visible(), vec!["beta-large", "beta-small"]);
+        a.on_key(key(KeyCode::Down));
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(&actions[..], [Action::Send(Cmd::SetModel(m))] if m == "beta-small"));
+    }
+
+    #[test]
+    fn model_picker_accepts_typed_id_when_nothing_matches() {
+        let mut a = app();
+        type_str(&mut a, "/model");
+        a.on_key(key(KeyCode::Enter));
+        a.on_event(Ev::Models(Ok(vec!["alpha".into()])));
+        type_str(&mut a, "custom-id");
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(&actions[..], [Action::Send(Cmd::SetModel(m))] if m == "custom-id"));
+    }
+
+    #[test]
+    fn model_list_failure_closes_picker_with_hint() {
+        let mut a = app();
+        type_str(&mut a, "/model");
+        a.on_key(key(KeyCode::Enter));
+        a.on_event(Ev::Models(Err("HTTP 401".into())));
+        assert!(a.modal.is_none());
+        assert!(a
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Error(e) if e.contains("/model ID"))));
+    }
+
+    #[test]
+    fn provider_and_effort_commands() {
+        let mut a = app();
+        type_str(&mut a, "/provider gemini");
+        assert!(
+            matches!(&a.on_key(key(KeyCode::Enter))[..], [Action::Send(Cmd::SetProvider(p))] if p == "gemini")
+        );
+        type_str(&mut a, "/effort high");
+        assert!(
+            matches!(&a.on_key(key(KeyCode::Enter))[..], [Action::Send(Cmd::SetEffort(Some(l)))] if l == "high")
+        );
+        type_str(&mut a, "/effort default");
+        assert!(matches!(
+            &a.on_key(key(KeyCode::Enter))[..],
+            [Action::Send(Cmd::SetEffort(None))]
+        ));
+        type_str(&mut a, "/provider");
+        a.on_key(key(KeyCode::Enter));
+        a.on_key(key(KeyCode::Down));
+        assert!(
+            matches!(&a.on_key(key(KeyCode::Enter))[..], [Action::Send(Cmd::SetProvider(p))] if p == "gemini")
+        );
+    }
+
+    #[test]
+    fn model_picker_needs_a_provider() {
+        let mut a = App::new(Profile::Build, "no provider".into());
+        type_str(&mut a, "/model");
+        assert!(a.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(a.modal.is_none());
     }
 
     #[test]

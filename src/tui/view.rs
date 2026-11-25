@@ -1,5 +1,5 @@
 //! Rendering. Reads `App`; the only state it writes back is the scroll clamp.
-use super::app::{help_text, App, Item, Modal, Status};
+use super::app::{help_text, App, Item, Modal, PickKind, Status};
 use crate::Profile;
 use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
@@ -265,6 +265,64 @@ fn draw_modal(frame: &mut Frame, screen: Rect, app: &App) {
                 0,
             )
         }
+        Modal::Picker {
+            kind,
+            filter,
+            selected,
+            loading,
+            ..
+        } => {
+            let (title, noun) = match kind {
+                PickKind::Model => (" Select model ", "models"),
+                PickKind::Provider => (" Select provider ", "providers"),
+                PickKind::Effort => (" Reasoning effort ", "levels"),
+            };
+            let shown = modal.visible();
+            let mut lines = vec![Line::from(vec![
+                Span::styled("filter: ", Style::new().bold()),
+                Span::raw(filter.clone()),
+                Span::styled("▏", Style::new().fg(Color::Cyan)),
+            ])];
+            lines.push(Line::raw(""));
+            if *loading {
+                lines.push(Line::styled(
+                    "loading models from the provider…",
+                    Style::new().add_modifier(Modifier::DIM),
+                ));
+            } else if shown.is_empty() {
+                let note = match kind {
+                    PickKind::Model if !filter.trim().is_empty() => {
+                        format!("no match; Enter uses '{}' as the model id", filter.trim())
+                    }
+                    _ => format!("no {noun} match"),
+                };
+                lines.push(Line::styled(note, Style::new().fg(Color::Yellow)));
+            } else {
+                // Window of rows that keeps the selection visible.
+                let rows = (area.height as usize).saturating_sub(6).max(1);
+                let start = selected
+                    .saturating_sub(rows / 2)
+                    .min(shown.len().saturating_sub(rows));
+                for (i, item) in shown.iter().enumerate().skip(start).take(rows) {
+                    let style = if i == *selected {
+                        Style::new().bold().fg(Color::Black).bg(Color::Cyan)
+                    } else {
+                        Style::new()
+                    };
+                    lines.push(Line::styled(format!(" {item} "), style));
+                }
+                lines.push(Line::styled(
+                    format!("{} of {} {noun}", selected + 1, shown.len()),
+                    Style::new().add_modifier(Modifier::DIM),
+                ));
+            }
+            (
+                title,
+                lines,
+                " type: filter   ↑↓: move   Enter: select   Esc: cancel ",
+                0,
+            )
+        }
         Modal::Help => (
             " Help ",
             help_text()
@@ -344,6 +402,23 @@ mod tests {
         assert!(screen.contains("gemini"));
         assert!(!screen.contains("AIzaSECRETKEY"));
         assert!(screen.contains("•••••••••••••"));
+    }
+
+    #[test]
+    fn model_picker_renders_list_and_selection() {
+        let mut app = App::new(Profile::Build, "gemini · m".into());
+        app.modal = Some(Modal::Picker {
+            kind: PickKind::Model,
+            items: (0..40).map(|i| format!("model-{i}")).collect(),
+            filter: "model-3".into(),
+            selected: 2,
+            loading: false,
+        });
+        let screen = render(&mut app, 80, 24);
+        assert!(screen.contains("Select model"));
+        assert!(screen.contains("model-3"));
+        assert!(screen.contains("3 of 11 models"));
+        assert!(!screen.contains("model-4 "));
     }
 
     #[test]

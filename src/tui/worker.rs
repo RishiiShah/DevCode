@@ -21,6 +21,11 @@ pub enum Cmd {
     Rollback(Option<usize>),
     /// Re-read `.devcode.json` (after `/init` wrote it).
     Reload,
+    ListModels,
+    SetModel(String),
+    SetProvider(String),
+    /// `None` clears the effort setting.
+    SetEffort(Option<String>),
 }
 
 pub enum Ev {
@@ -32,8 +37,9 @@ pub enum Ev {
     Done(Box<LoopResult>),
     Failed(String),
     Info(Vec<String>),
-    /// Provider label after a connect or reload.
+    /// Provider label after a connect, reload or switch.
     Provider(String),
+    Models(Result<Vec<String>, String>),
 }
 
 pub struct ChannelWriter(pub Sender<Ev>);
@@ -114,6 +120,17 @@ pub fn spawn(
     })
 }
 
+fn switched(
+    session: &Session,
+    result: Result<Option<String>, crate::DevCodeError>,
+    events: &Sender<Ev>,
+) {
+    let _ = events.send(match result {
+        Ok(_) => Ev::Provider(session.provider_label()),
+        Err(e) => Ev::Failed(e.to_string()),
+    });
+}
+
 fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
     match cmd {
         Cmd::Prompt(text) => {
@@ -143,6 +160,33 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
                 Ok(()) => Ev::Provider(session.provider_label()),
                 Err(e) => Ev::Failed(e.to_string()),
             });
+        }
+        Cmd::ListModels => {
+            let _ = events.send(Ev::Models(session.list_models().map_err(|e| e.to_string())));
+        }
+        Cmd::SetModel(id) => {
+            let result = session.set_model(&id);
+            switched(session, result, events);
+        }
+        Cmd::SetProvider(name) => {
+            let result = session.set_provider(&name);
+            switched(session, result, events);
+            // A switch without a stored key works until the first request; say so now.
+            let stored = session.connections().unwrap_or_default();
+            let has_key = stored
+                .iter()
+                .any(|line| line.starts_with(&format!("{name} ")));
+            let env_set = crate::config::preset(&name)
+                .is_some_and(|p| !p.api_key_env.is_empty() && std::env::var(p.api_key_env).is_ok());
+            if !has_key && !env_set {
+                let _ = events.send(Ev::Info(vec![format!(
+                    "no stored key for {name}; run /connect {name}"
+                )]));
+            }
+        }
+        Cmd::SetEffort(level) => {
+            let result = session.set_effort(level.as_deref());
+            switched(session, result, events);
         }
         Cmd::Rollback(step) => {
             let root = match std::env::current_dir() {

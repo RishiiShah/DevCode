@@ -263,4 +263,35 @@ impl Model for OpenAiCompat {
         self.complete_inner(req, None, true)
             .map(|(response, _)| response)
     }
+    fn list_models(&self) -> Result<Vec<String>, ModelError> {
+        let url = format!("{}/models", self.config.base_url.trim_end_matches('/'));
+        let mut call = self.client.get(&url);
+        if !self.key.is_empty() {
+            call = call.set("Authorization", &format!("Bearer {}", self.key));
+        }
+        let value: Value = match call.call() {
+            Ok(response) => response
+                .into_json()
+                .map_err(|e| ModelError::FormatError(self.redact(&e.to_string())))?,
+            Err(ureq::Error::Status(code, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                return Err(ModelError::Network(
+                    self.redact(&format!("HTTP {code}: {body}")),
+                ));
+            }
+            Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
+        };
+        let mut ids: Vec<String> = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ModelError::FormatError("model list has no data array".into()))?
+            .iter()
+            .filter_map(|m| m.get("id").and_then(Value::as_str))
+            // Gemini's compatibility endpoint prefixes ids with "models/".
+            .map(|id| id.strip_prefix("models/").unwrap_or(id).to_owned())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
 }

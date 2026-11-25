@@ -90,13 +90,104 @@ impl Session {
     }
     pub fn provider_label(&self) -> String {
         match &self.config.provider {
-            Some(p) => format!(
-                "{} · {}",
-                p.connector.as_deref().unwrap_or("custom"),
-                p.model
-            ),
+            Some(p) => {
+                let mut label = format!(
+                    "{} · {}",
+                    p.connector.as_deref().unwrap_or("custom"),
+                    p.model
+                );
+                if let Some(effort) = p
+                    .extra_body
+                    .get("reasoning_effort")
+                    .and_then(|v| v.as_str())
+                {
+                    label.push_str(&format!(" · effort {effort}"));
+                }
+                label
+            }
             None => "no provider".into(),
         }
+    }
+    /// Rebuilds the model for `provider` and stores it. A missing key does not block the switch;
+    /// the warning comes back so the UI can say how to fix it.
+    fn apply_provider(&mut self, provider: config::ProviderConfig) -> Option<String> {
+        let (model, warning): (Box<dyn agent::Model>, Option<String>) =
+            match build_model(provider.clone()) {
+                Ok(model) => (model, None),
+                Err(e) => {
+                    let text = e.to_string();
+                    (Box::new(UnavailableModel(text.clone())), Some(text))
+                }
+            };
+        self.model = model;
+        self.config.provider = Some(provider);
+        warning
+    }
+    pub fn list_models(&self) -> Result<Vec<String>, DevCodeError> {
+        self.model
+            .list_models()
+            .map_err(|e| DevCodeError::Config(e.to_string()))
+    }
+    /// Switches the model id. Session only; `.devcode.json` is not rewritten.
+    pub fn set_model(&mut self, id: &str) -> Result<Option<String>, DevCodeError> {
+        let id = id.trim();
+        let mut provider = self.config.provider.clone().ok_or_else(|| {
+            DevCodeError::Config("no provider configured; run /provider first".into())
+        })?;
+        if id.is_empty() {
+            return Err(DevCodeError::Config("model id cannot be empty".into()));
+        }
+        provider.model = id.to_owned();
+        Ok(self.apply_provider(provider))
+    }
+    /// Switches to a preset provider with its default model. Session only.
+    pub fn set_provider(&mut self, name: &str) -> Result<Option<String>, DevCodeError> {
+        let preset = config::preset(name).ok_or_else(|| {
+            DevCodeError::Config(format!(
+                "unknown provider '{name}'; choose one of: {}",
+                config::PRESETS.map(|p| p.name).join(", ")
+            ))
+        })?;
+        let old = self.config.provider.clone();
+        let provider = config::ProviderConfig {
+            kind: config::ProviderKind::OpenaiCompat,
+            base_url: preset.base_url.into(),
+            api_key_env: preset.api_key_env.into(),
+            connector: Some(preset.name.into()),
+            model: preset.default_model.into(),
+            context_window: old.as_ref().map_or(32000, |p| p.context_window.max(1)),
+            max_rpm: old.and_then(|p| p.max_rpm),
+            // Provider-specific options such as reasoning_effort do not carry over.
+            extra_body: Default::default(),
+        };
+        Ok(self.apply_provider(provider))
+    }
+    /// Sets or clears reasoning effort (low, medium, high). Session only; Gemini endpoint only.
+    pub fn set_effort(&mut self, level: Option<&str>) -> Result<Option<String>, DevCodeError> {
+        let mut provider = self.config.provider.clone().ok_or_else(|| {
+            DevCodeError::Config("no provider configured; run /provider first".into())
+        })?;
+        if !provider.supports_effort() {
+            return Err(DevCodeError::Config(
+                "reasoning effort is only wired for the gemini provider so far".into(),
+            ));
+        }
+        match level {
+            None => {
+                provider.extra_body.remove("reasoning_effort");
+            }
+            Some(l) if matches!(l, "low" | "medium" | "high") => {
+                provider
+                    .extra_body
+                    .insert("reasoning_effort".into(), serde_json::json!(l));
+            }
+            Some(other) => {
+                return Err(DevCodeError::Config(format!(
+                    "unknown effort '{other}'; use low, medium, high or default"
+                )))
+            }
+        }
+        Ok(self.apply_provider(provider))
     }
     pub fn connections(&self) -> Result<Vec<String>, DevCodeError> {
         let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;

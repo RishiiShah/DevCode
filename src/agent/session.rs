@@ -119,6 +119,9 @@ impl Model for RateLimitedModel {
     fn redact_sensitive(&self, text: &str) -> String {
         self.model.redact_sensitive(text)
     }
+    fn list_models(&self) -> Result<Vec<String>, ModelError> {
+        self.model.list_models()
+    }
     fn complete(&self, request: &Request) -> Result<Response, ModelError> {
         let mut last = self
             .last

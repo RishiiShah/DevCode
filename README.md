@@ -58,7 +58,7 @@ devcode --profile build "fix the bug in calc.py"         # edits with approval, 
 devcode rollback                                         # undo the whole latest run
 ```
 
-Run `devcode` with no prompt in a terminal to open the full-screen interface: live transcript, diff approvals in a modal, masked key entry, and slash commands (`/help`, `/init nim|gemini`, `/connect`, `/ask`, `/plan`, `/build`, `/rollback`). `--plain` keeps the line-based REPL. With no `verification.test_command` configured, build runs finish marked UNVERIFIED instead of looping.
+Run `devcode` with no prompt in a terminal to open the full-screen interface: live transcript, diff approvals in a modal, masked key entry, and slash commands (`/help`, `/init nim|gemini`, `/connect`, `/provider`, `/model` (lists the provider's models, filterable), `/effort` (Gemini only), `/ask`, `/plan`, `/build`, `/rollback`). `--plain` keeps the line-based REPL. With no `verification.test_command` configured, build runs finish marked UNVERIFIED instead of looping.
 
 `--trace` writes per-step timing and token counts (no file contents) to `.devcode/trace.jsonl`. Do not paste input while `devcode` runs: approval prompts read stdin. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
 

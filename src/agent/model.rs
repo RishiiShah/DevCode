@@ -115,4 +115,10 @@ pub trait Model: Send + Sync {
         text.to_string()
     }
     fn complete(&self, req: &Request) -> Result<Response, ModelError>;
+    /// Model ids the backend offers, for the UI's model picker.
+    fn list_models(&self) -> Result<Vec<String>, ModelError> {
+        Err(ModelError::Other(
+            "this backend cannot list models; type an id instead".into(),
+        ))
+    }
 }
