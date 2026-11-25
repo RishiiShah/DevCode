@@ -604,7 +604,12 @@ pub fn classify_prompt(text: String) -> Modal {
 
 /// Turns terse core errors into next steps.
 fn hint_for(message: &str) -> String {
-    if message.contains("provider.model is missing") {
+    let message = &message.replace("model error: model error: ", "model error: ");
+    if message.contains("devcode auth login") {
+        format!(
+            "{message}. Stored keys are only used when .devcode.json has \"connector\": \"NAME\" under provider (or devcode starts with --provider nim). Add that line, or /connect NAME to store a key."
+        )
+    } else if message.contains("provider.model is missing") {
         format!("{message}. Run /init nim (or /init gemini), then /connect.")
     } else if message.contains("HTTP 401") || message.contains("HTTP 403") {
         format!("{message}. The key was rejected; run /connect to store a new one.")
@@ -841,6 +846,19 @@ mod tests {
         assert!(a
             .items
             .contains(&Item::Note("Verification Summary: ok".into())));
+    }
+
+    #[test]
+    fn missing_key_error_explains_connector_and_drops_double_prefix() {
+        let mut a = app();
+        a.on_event(Ev::Failed(
+            "model error: model error: run `devcode auth login NAME` or set NVIDIA_API_KEY".into(),
+        ));
+        let Some(Item::Error(text)) = a.items.last() else {
+            panic!("expected error item")
+        };
+        assert!(!text.contains("model error: model error"));
+        assert!(text.contains("\"connector\""));
     }
 
     #[test]
