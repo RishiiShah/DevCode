@@ -82,6 +82,13 @@ fn switching_provider_model_and_effort() {
     empty.set_provider("gemini").unwrap();
     assert!(empty.has_provider());
 
+    // Native Anthropic preset switches kind (P10a).
+    empty.set_provider("anthropic").unwrap();
+    assert_eq!(
+        empty.provider_label(),
+        format!("anthropic · {}", preset("anthropic").unwrap().default_model)
+    );
+
     // CLI --provider applies any preset, not only nim.
     let cli = devcode::Cli::parse_from(["devcode", "--provider", "gemini"]);
     let mut cfg = Config {

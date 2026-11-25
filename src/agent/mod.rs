@@ -1,3 +1,4 @@
+pub mod anthropic;
 pub mod loop_runner;
 pub mod model;
 pub mod openai_compat;

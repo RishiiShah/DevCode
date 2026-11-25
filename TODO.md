@@ -342,7 +342,7 @@ MVP harness M0–M13 is on main (CLI loop, guard, manifest/rollback, gate, appro
 | P9 | partial | Prefetch + `App.models` cache on connect/switch | OpenCode durable model registry / variants |
 | P10 | partial | Account rows stored\|env\|missing; connect persists; `openai` + `openrouter` presets | **No** OAuth, keyring, `auth switch`, native Claude/Anthropic |
 
-- [ ] **P10a** Native Anthropic Messages adapter (not OpenRouter proxy) — bar: OpenCode/Cline Anthropic
+- [ ] **P10a** Native Anthropic Messages adapter — bar: OpenCode/pi (OAuth + always-stream + betas). **Landed (still partial):** `ProviderKind::Anthropic`, `src/agent/anthropic.rs`, preset `anthropic` (`ANTHROPIC_API_KEY`), fake-server tests `m20_anthropic` (7). Missing vs peers: OAuth, forced SSE stream path, beta headers, live keyed dogfood.
 - [ ] **P10b** OAuth / device-code login for at least one provider — bar: Codex / gemini-cli
 - [ ] **P10c** OS keyring backend (optional file) — bar: Codex / gemini-cli HybridTokenStorage
 - [ ] **P10d** Multi-credential + `auth switch` — bar: OpenCode `auth switch`

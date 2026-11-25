@@ -180,7 +180,7 @@ impl Session {
         })?;
         let old = self.config.provider.clone();
         let provider = config::ProviderConfig {
-            kind: config::ProviderKind::OpenaiCompat,
+            kind: preset.kind,
             base_url: preset.base_url.into(),
             api_key_env: preset.api_key_env.into(),
             connector: Some(preset.name.into()),
@@ -470,14 +470,22 @@ fn build_model(provider: config::ProviderConfig) -> Result<Box<dyn agent::Model>
             "provider.model is missing from configuration".into(),
         ));
     }
-    let model = agent::openai_compat::OpenAiCompat::new(provider.clone())
-        .map_err(|e| DevCodeError::Config(e.to_string()))?;
+    let model: Box<dyn agent::Model> = match provider.kind {
+        config::ProviderKind::OpenaiCompat => Box::new(
+            agent::openai_compat::OpenAiCompat::new(provider.clone())
+                .map_err(|e| DevCodeError::Config(e.to_string()))?,
+        ),
+        config::ProviderKind::Anthropic => Box::new(
+            agent::anthropic::Anthropic::new(provider.clone())
+                .map_err(|e| DevCodeError::Config(e.to_string()))?,
+        ),
+    };
     if let Some(rpm) = provider.max_rpm {
         Ok(Box::new(agent::session::RateLimitedModel::new(
-            Box::new(model),
+            model,
             std::time::Duration::from_secs_f64(60.0 / f64::from(rpm)),
         )))
     } else {
-        Ok(Box::new(model))
+        Ok(model)
     }
 }

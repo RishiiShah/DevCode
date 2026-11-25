@@ -100,7 +100,9 @@ fn rejects_invalid_arguments() {
 #[test]
 fn rejects_unsupported_provider() {
     let err = parse_config(r#"{"provider":{"kind":"bad","base_url":"x","api_key_env":"","model":"x","context_window":1}}"#).unwrap_err();
-    assert!(err.to_string().contains("openai_compat"));
+    let text = err.to_string();
+    assert!(text.contains("openai_compat"), "{text}");
+    assert!(text.contains("anthropic"), "{text}");
 }
 
 #[test]

@@ -49,10 +49,21 @@ pub struct ProviderConfig {
     pub extra_body: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderKind {
     #[serde(rename = "openai_compat")]
     OpenaiCompat,
+    #[serde(rename = "anthropic")]
+    Anthropic,
+}
+
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiCompat => "openai_compat",
+            Self::Anthropic => "anthropic",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,7 +138,7 @@ impl std::error::Error for ConfigError {
 pub fn provider_from_preset(name: &str) -> Option<ProviderConfig> {
     let preset = preset(name)?;
     Some(ProviderConfig {
-        kind: ProviderKind::OpenaiCompat,
+        kind: preset.kind,
         base_url: preset.base_url.into(),
         api_key_env: preset.api_key_env.into(),
         connector: Some(preset.name.into()),
@@ -216,21 +227,24 @@ fn deserialize_env_name<'de, D: serde::Deserializer<'de>>(
 /// Known providers for the UI. Models are not listed here; the picker asks the provider.
 pub struct Preset {
     pub name: &'static str,
+    pub kind: ProviderKind,
     pub base_url: &'static str,
     pub api_key_env: &'static str,
     /// A model id that worked in a live run when this was written.
     pub default_model: &'static str,
 }
 
-pub const PRESETS: [Preset; 4] = [
+pub const PRESETS: [Preset; 5] = [
     Preset {
         name: "nim",
+        kind: ProviderKind::OpenaiCompat,
         base_url: "https://integrate.api.nvidia.com/v1",
         api_key_env: "NVIDIA_API_KEY",
         default_model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
     },
     Preset {
         name: "gemini",
+        kind: ProviderKind::OpenaiCompat,
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
         api_key_env: "GEMINI_API_KEY",
         // Prefer a catalog id that answers under load; gemini-3.8-flash often 503'd in RES-013.
@@ -238,14 +252,23 @@ pub const PRESETS: [Preset; 4] = [
     },
     Preset {
         name: "openai",
+        kind: ProviderKind::OpenaiCompat,
         base_url: "https://api.openai.com/v1",
         api_key_env: "OPENAI_API_KEY",
         default_model: "gpt-4o",
     },
-    // Claude and other vendors via OpenRouter's OpenAI-compatible API until a native
-    // Anthropic Messages adapter ships (mvp.md post-MVP). Pick Claude models with /model.
+    // Native Anthropic Messages API (P10a). Peer bar: OpenCode/pi anthropic providers.
+    Preset {
+        name: "anthropic",
+        kind: ProviderKind::Anthropic,
+        base_url: "https://api.anthropic.com",
+        api_key_env: "ANTHROPIC_API_KEY",
+        default_model: "claude-sonnet-4-20250514",
+    },
+    // Other vendors / Claude via OpenRouter's OpenAI-compatible API.
     Preset {
         name: "openrouter",
+        kind: ProviderKind::OpenaiCompat,
         base_url: "https://openrouter.ai/api/v1",
         api_key_env: "OPENROUTER_API_KEY",
         default_model: "anthropic/claude-sonnet-4",
@@ -317,6 +340,7 @@ impl ProviderConfig {
             || PRESETS
                 .iter()
                 .any(|other| other.name != p.name && other.default_model == self.model);
+        self.kind = p.kind;
         self.connector = Some(p.name.into());
         self.base_url = p.base_url.into();
         self.api_key_env = p.api_key_env.into();

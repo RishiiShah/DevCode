@@ -1100,9 +1100,10 @@ pub fn init_template(provider: &str, test_command: Option<&str>) -> Option<Strin
     let (connector, base_url, model) = (preset.name, preset.base_url, preset.default_model);
     let mut value = serde_json::json!({
         "provider": {
-            "kind": "openai_compat",
+            "kind": preset.kind.as_str(),
             "base_url": base_url,
             "connector": connector,
+            "api_key_env": preset.api_key_env,
             "model": model,
             "context_window": 32000
         }

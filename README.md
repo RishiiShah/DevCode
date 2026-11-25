@@ -31,7 +31,7 @@ Empirical research notes supporting these normative standards are maintained und
 
 ## Quickstart (MVP, macOS and Linux)
 
-Status: working MVP. Live-tested with NVIDIA NIM (RES-012) and Gemini (RES-013 multi-file build) on macOS via the OpenAI-compatible adapter. Presets: `nim`, `gemini`, `openai`, `openrouter` (Claude models via OpenRouter until a native Anthropic adapter). `debug` and `security` profiles are not built; Windows is not supported yet.
+Status: working MVP. Live-tested with NVIDIA NIM (RES-012) and Gemini (RES-013) on macOS. Presets: `nim`, `gemini`, `openai`, `anthropic` (native Messages API; still short of OpenCode OAuth/stream parity), `openrouter`. `debug` and `security` profiles are not built; Windows is not supported yet.
 
 ```sh
 cargo build --release          # binary: target/release/devcode

@@ -34,14 +34,15 @@ Where does DevCode lag peers on connecting provider accounts (Codex / Claude / G
 - `auth login` defaulted CLI name only for `--provider nim`
 - Native Anthropic / OAuth / keyring / multi-profile: mvp.md non-goals
 
-## Narrowed this pass (still PARTIAL vs peers — not done)
+## Narrowed (still PARTIAL vs peers — not done)
 
 1. Account list rows: `stored` / `env` / `stored+env` / `missing` + active `*` (OpenCode-shaped **list**, not full auth product).
 2. `/connect` best-effort `persist_provider`.
 3. `auth login` defaults from any `--provider` preset.
-4. Presets `openai` + `openrouter` (Claude only via OpenRouter proxy).
+4. Presets `openai` + `openrouter` (proxy path retained).
+5. **P10a landed partial:** native Messages adapter `src/agent/anthropic.rs` + preset `anthropic`. Fake-server green (`m20_anthropic`). Still behind OpenCode/pi on OAuth, SSE-only stream, and beta feature headers.
 
-**Do not mark P10 done** until P10a–P10d in TODO match OpenCode/Codex/gemini-cli.
+**Do not mark P10 / P10a done** until peer bar in TODO is met.
 
 ## Open to reach peer level
 
