@@ -6,6 +6,12 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+#[test]
+fn snapshot_fails_when_workspace_cannot_be_walked() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(snapshot_guard_set(&dir.path().join("missing"), None).is_err());
+}
 use std::process::Command;
 use std::time::Instant;
 

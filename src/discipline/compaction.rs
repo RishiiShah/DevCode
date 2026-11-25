@@ -17,7 +17,7 @@ pub fn should_compact(total_tokens: u64, context_window: u64) -> bool {
     if context_window == 0 {
         return false;
     }
-    total_tokens * 4 > context_window * 3
+    u128::from(total_tokens) * 4 > u128::from(context_window) * 3
 }
 
 /// Produces a deterministic, model-call-free compacted message history.
@@ -107,14 +107,28 @@ pub fn compact_messages(messages: &[Message], ctx: &CompactionContext) -> Vec<Me
     });
 
     // Retain up to last 2 messages (e.g. latest assistant call and tool output)
-    let tail_len = if messages.len() > 2 { 2 } else { 0 };
-    if tail_len > 0 {
-        for msg in &messages[messages.len() - tail_len..] {
+    if messages.len() > 2 {
+        let mut start = messages.len() - 2;
+        if messages[start].role == Role::Tool {
+            start = messages[..start]
+                .iter()
+                .rposition(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
+                .unwrap_or(messages.len());
+        }
+        for msg in &messages[start..] {
             let mut m = msg.clone();
             // Truncate long tool output if needed (keep head & tail with marker)
             if m.content.len() > 1000 {
-                let head = &m.content[..300];
-                let tail = &m.content[m.content.len() - 300..];
+                let head: String = m.content.chars().take(300).collect();
+                let tail: String = m
+                    .content
+                    .chars()
+                    .rev()
+                    .take(300)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
                 m.content = format!(
                     "{}\n[... output truncated by compaction ...]\n{}",
                     head, tail

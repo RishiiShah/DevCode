@@ -39,6 +39,56 @@ fn test_diff_formatting() {
 }
 
 #[test]
+fn find_delete_is_reconciled_and_rolled_back() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("victim"), "original").unwrap();
+    let mut prompt = ApprovalPrompt::new(Cursor::new(b""), Vec::new(), true, true);
+    let mut log = ToolLog::new();
+    let result = execute_guarded_command(
+        temp.path(),
+        "find . -name victim -delete",
+        "find",
+        1,
+        5,
+        &mut prompt,
+        &mut log,
+    )
+    .unwrap();
+    assert_eq!(
+        result.reconciled.unwrap().deleted,
+        vec![PathBuf::from("victim")]
+    );
+    devcode::manifest::rollback(temp.path(), "find", None).unwrap();
+    assert_eq!(
+        fs::read_to_string(temp.path().join("victim")).unwrap(),
+        "original"
+    );
+}
+
+#[test]
+fn shell_symlink_deletion_restores_original_target() {
+    let temp = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("missing-target", temp.path().join("link")).unwrap();
+    let mut prompt = ApprovalPrompt::new(Cursor::new(b""), Vec::new(), true, true);
+    let mut log = ToolLog::new();
+    execute_guarded_command(
+        temp.path(),
+        "python3 -c 'import os; os.unlink(\"link\")'",
+        "link",
+        1,
+        5,
+        &mut prompt,
+        &mut log,
+    )
+    .unwrap();
+    devcode::manifest::rollback(temp.path(), "link", None).unwrap();
+    assert_eq!(
+        fs::read_link(temp.path().join("link")).unwrap(),
+        PathBuf::from("missing-target")
+    );
+}
+
+#[test]
 fn test_lexical_guard_table_test_25_cases() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

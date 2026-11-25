@@ -111,28 +111,8 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
 
     let snap_before = snapshot_guard_set(root, None).map_err(ExecutionError::Snapshot)?;
 
-    // 3. If read-only allowlist, just run bounded
-    let read_only = is_read_only_command(cmd_str);
     let argv = ["sh", "-c", cmd_str];
     let timeout = Duration::from_secs(timeout_secs);
-
-    if read_only {
-        let res =
-            run_bounded(&argv, root, timeout, DEFAULT_OUT_CAP).map_err(ExecutionError::Process)?;
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        tool_log.record_command(cmd_str, res.exit_code, ts);
-        return Ok(CommandOutput {
-            stdout_stderr: res.output_text(),
-            exit_code: res.exit_code,
-            timed_out: res.timed_out,
-            reconciled: None,
-        });
-    }
-
-    // 4. Mutation-capable: run bounded, then snapshot after and reconcile
     let res =
         run_bounded(&argv, root, timeout, DEFAULT_OUT_CAP).map_err(ExecutionError::Process)?;
 
@@ -172,7 +152,7 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
                 path: p.clone(),
                 exists: true,
                 file_type: fp.map(|f| f.file_type),
-                symlink_target: None,
+                symlink_target: fp.and_then(|f| f.symlink_target.clone()),
                 mode: fp.map(|f| f.mode),
                 sha256: fp.and_then(|f| f.sha256.clone()),
                 blob_ref: fp.and_then(|f| f.sha256.clone()),
@@ -187,7 +167,7 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
                 path: p.clone(),
                 exists: true,
                 file_type: fp.map(|f| f.file_type),
-                symlink_target: None,
+                symlink_target: fp.and_then(|f| f.symlink_target.clone()),
                 mode: fp.map(|f| f.mode),
                 sha256: fp.and_then(|f| f.sha256.clone()),
                 blob_ref: fp.and_then(|f| f.sha256.clone()),

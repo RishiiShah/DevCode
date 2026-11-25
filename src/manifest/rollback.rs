@@ -191,6 +191,17 @@ pub fn rollback(
                             }
                         };
                         let bytes = read_blob(root, blob_ref)?;
+                        if fs::symlink_metadata(&full_path)
+                            .is_ok_and(|m| m.file_type().is_symlink())
+                        {
+                            fs::remove_file(&full_path).map_err(|source| {
+                                ManifestError::PartialRecovery {
+                                    restored: restored_paths.clone(),
+                                    failed_path: pre.path.clone(),
+                                    source,
+                                }
+                            })?;
+                        }
                         if let Err(source) = fs::write(&full_path, &bytes) {
                             return Err(ManifestError::PartialRecovery {
                                 restored: restored_paths,
@@ -205,17 +216,28 @@ pub fn rollback(
                         restored_paths.push(pre.path.clone());
                     }
                     Some(FileType::Symlink) => {
+                        let target =
+                            pre.symlink_target
+                                .as_ref()
+                                .ok_or_else(|| ManifestError::Conflict {
+                                    path: pre.path.clone(),
+                                    reason: "missing symlink target in pre-state".into(),
+                                })?;
                         if full_path.exists() || fs::symlink_metadata(&full_path).is_ok() {
-                            let _ = fs::remove_file(&full_path);
-                        }
-                        if let Some(target) = &pre.symlink_target {
-                            if let Err(source) = symlink(target, &full_path) {
-                                return Err(ManifestError::PartialRecovery {
-                                    restored: restored_paths,
+                            fs::remove_file(&full_path).map_err(|source| {
+                                ManifestError::PartialRecovery {
+                                    restored: restored_paths.clone(),
                                     failed_path: pre.path.clone(),
                                     source,
-                                });
-                            }
+                                }
+                            })?;
+                        }
+                        if let Err(source) = symlink(target, &full_path) {
+                            return Err(ManifestError::PartialRecovery {
+                                restored: restored_paths,
+                                failed_path: pre.path.clone(),
+                                source,
+                            });
                         }
                         restored_paths.push(pre.path.clone());
                     }

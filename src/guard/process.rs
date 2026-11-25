@@ -7,6 +7,7 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -138,6 +139,15 @@ pub fn run_bounded<S: AsRef<str>>(
 
     // SAFETY: `read_fd` is a valid open file descriptor transferred to File.
     let mut reader_file = unsafe { File::from_raw_fd(read_fd) };
+    // SAFETY: read_fd is open and owned by reader_file.
+    if unsafe { libc::fcntl(read_fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
+        // SAFETY: these descriptors have not yet been transferred to Stdio.
+        unsafe {
+            libc::close(write_fd);
+            libc::close(write_fd_err);
+        }
+        return Err(GuardError::Io(std::io::Error::last_os_error()));
+    }
 
     // Spawn child with write_fd and write_fd_err attached to stdout/stderr.
     // The Command object is scoped and dropped immediately after spawn,
@@ -165,6 +175,8 @@ pub fn run_bounded<S: AsRef<str>>(
 
     let collector = Arc::new(Mutex::new(BoundedCollector::new(out_cap)));
     let collector_clone = Arc::clone(&collector);
+    let stop_reader = Arc::new(AtomicBool::new(false));
+    let reader_stop = Arc::clone(&stop_reader);
 
     // Reader thread reading merged stdout/stderr until EOF
     let reader_handle = thread::spawn(move || {
@@ -178,6 +190,12 @@ pub fn run_bounded<S: AsRef<str>>(
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if reader_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
                 Err(_) => break,
             }
         }
@@ -186,9 +204,15 @@ pub fn run_bounded<S: AsRef<str>>(
     let start = Instant::now();
     let mut timed_out = false;
 
+    let mut child_status = None;
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(GuardError::Io)? {
-            break status;
+        if child_status.is_none() {
+            child_status = child.try_wait().map_err(GuardError::Io)?;
+        }
+        if let Some(status) = child_status {
+            if reader_handle.is_finished() {
+                break status;
+            }
         }
 
         if start.elapsed() >= timeout {
@@ -203,8 +227,11 @@ pub fn run_bounded<S: AsRef<str>>(
 
             // Grace period: wait up to 50ms for process group to exit cleanly
             let grace_deadline = Instant::now() + Duration::from_millis(50);
-            let mut exited_status = None;
+            let mut exited_status = child_status;
             while Instant::now() < grace_deadline {
+                if exited_status.is_some() {
+                    break;
+                }
                 if let Some(s) = child.try_wait().map_err(GuardError::Io)? {
                     exited_status = Some(s);
                     break;
@@ -212,13 +239,13 @@ pub fn run_bounded<S: AsRef<str>>(
                 thread::sleep(Duration::from_millis(5));
             }
 
+            // SAFETY: kill remaining members even if the shell already exited.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
             let final_status = if let Some(s) = exited_status {
                 s
             } else {
-                // SAFETY: `pid` is the positive PGID of the target child process group.
-                unsafe {
-                    libc::killpg(pid, libc::SIGKILL);
-                }
                 child.wait().map_err(GuardError::Io)?
             };
 
@@ -233,6 +260,7 @@ pub fn run_bounded<S: AsRef<str>>(
                 thread::sleep(Duration::from_millis(5));
             }
 
+            stop_reader.store(true, Ordering::Relaxed);
             break final_status;
         }
 

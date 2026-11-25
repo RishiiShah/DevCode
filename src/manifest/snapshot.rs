@@ -29,6 +29,8 @@ pub struct FileFingerprint {
     pub mtime_ns: u128,
     pub mode: u32,
     pub sha256: Option<String>,
+    #[serde(default)]
+    pub symlink_target: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -73,10 +75,7 @@ pub fn snapshot_guard_set(
     let mut total_blob_bytes = previous.map(|p| p.total_blob_bytes).unwrap_or(0);
 
     for result in builder.build() {
-        let entry = match result {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let entry = result.map_err(|e| ManifestError::Io(std::io::Error::other(e)))?;
 
         let path = entry.path();
         let rel_path = match path.strip_prefix(root) {
@@ -106,10 +105,7 @@ pub fn snapshot_guard_set(
             continue;
         }
 
-        let meta = match fs::symlink_metadata(path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        let meta = fs::symlink_metadata(path).map_err(ManifestError::Io)?;
 
         // If directory, skip adding to files map
         if meta.file_type().is_dir() {
@@ -187,6 +183,11 @@ pub fn snapshot_guard_set(
                 mtime_ns,
                 mode,
                 sha256,
+                symlink_target: if file_type == FileType::Symlink {
+                    Some(fs::read_link(path).map_err(ManifestError::Io)?)
+                } else {
+                    None
+                },
             },
         );
     }

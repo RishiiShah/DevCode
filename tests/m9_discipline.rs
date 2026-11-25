@@ -16,6 +16,39 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 #[test]
+fn compaction_keeps_complete_tool_group_and_unicode() {
+    let config = Config::default();
+    let log = ToolLog::new();
+    let ctx = CompactionContext {
+        context_window: 1000,
+        active_manifest: None,
+        current_diff: "",
+        config: &config,
+        tool_log: &log,
+    };
+    let calls: Vec<ToolCall> = (0..3)
+        .map(|i| ToolCall {
+            id: i.to_string(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            thought_signature: None,
+        })
+        .collect();
+    let messages = vec![
+        Message::user("goal"),
+        Message::assistant("", calls),
+        Message::tool("é".repeat(700), "0"),
+        Message::tool("two", "1"),
+        Message::tool("three", "2"),
+    ];
+    let compacted = compact_messages(&messages, &ctx);
+    assert_eq!(compacted[2].tool_calls.len(), 3);
+    assert_eq!(compacted[3].tool_call_id.as_deref(), Some("0"));
+    assert_eq!(compacted[5].tool_call_id.as_deref(), Some("2"));
+    assert!(compacted[3].content.contains("output truncated"));
+}
+
+#[test]
 fn test_scope_contract_in_scope_and_out_of_scope() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
