@@ -31,11 +31,11 @@ Empirical research notes supporting these normative standards are maintained und
 
 ## Quickstart (MVP, macOS and Linux)
 
-Status: working MVP, tested live only with NVIDIA NIM on macOS. `debug` and `security` profiles are not built; Windows is not supported yet.
+Status: working MVP. Live-tested with NVIDIA NIM (RES-012) and Gemini (RES-013 multi-file build) on macOS via the OpenAI-compatible adapter (`--provider nim|gemini`, `NVIDIA_API_KEY` / `GEMINI_API_KEY`). `debug` and `security` profiles are not built; Windows is not supported yet.
 
 ```sh
 cargo build --release          # binary: target/release/devcode
-export NVIDIA_API_KEY=...      # or the env var named in api_key_env; the key is never stored in config
+export NVIDIA_API_KEY=...      # or GEMINI_API_KEY for --provider gemini; key never stored in config
 ```
 
 Create `.devcode.json` in the repository you want to work on:
@@ -58,7 +58,7 @@ devcode --profile build "fix the bug in calc.py"         # edits with approval, 
 devcode rollback                                         # undo the whole latest run
 ```
 
-Run `devcode` with no prompt in a terminal to open the full-screen interface: live transcript, diff approvals in a modal, masked key entry, and slash commands (`/help`, `/init nim|gemini`, `/connect`, `/provider`, `/model` (lists the provider's models, filterable), `/effort` (Gemini only), `/ask`, `/plan`, `/build`, `/rollback`). `--plain` keeps the line-based REPL. With no `verification.test_command` configured, build runs finish marked UNVERIFIED instead of looping.
+Run `devcode` with no prompt in a terminal to open the full-screen interface: live transcript, diff approvals in a modal, masked key entry, and slash commands (`/help`, `/init nim|gemini`, `/connect`, `/provider`, `/model` (catalog auto-fetches on connect/provider switch; filterable), `/effort` (Gemini only), `/ask`, `/plan`, `/build`, `/rollback`). `--plain` keeps the line-based REPL. With no `verification.test_command` configured, build runs finish marked UNVERIFIED instead of looping.
 
 `--trace` writes per-step timing and token counts (no file contents) to `.devcode/trace.jsonl`. Do not paste input while `devcode` runs: approval prompts read stdin. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
 

@@ -34,7 +34,7 @@ Rule: one item at a time, in order. Item done = edit made, verified, "not checke
 Goal: a working CLI an engineer can run on a real repo, showing the thesis: minimal verified change, reversible, low token use.
 - Platforms: macOS and Linux first. Windows native after MVP (spec keeps it Tier 1).
 - Profiles: `ask`, `plan`, `build`. `debug` and `security` after MVP.
-- Model provider: **undecided; the specs never name one.** MVP needs exactly one adapter (decide which).
+- Model provider: NVIDIA NIM first; Gemini second via same `openai_compat` adapter (M0/P1–P8).
 - Tools: read, glob, grep (JIT only), write/edit, run_command.
 - Guard: workspace realpath allowlist, `.devcode/` deny, env credential strip, process-tree timeout kill.
 - Rollback: step manifests plus shell guard-set snapshot; `devcode rollback`.
@@ -44,7 +44,7 @@ Goal: a working CLI an engineer can run on a real repo, showing the thesis: mini
 - Approvals: diff once/always/reject; destructive commands always ask.
 
 ## MVP build order
-- [ ] M0 **Decide**: provider = NVIDIA NIM via OpenAI-compatible adapter (decided); confirm scope above; pick NIM model.
+- [x] M0 **Decide**: provider = NVIDIA NIM via OpenAI-compatible adapter (decided); confirm scope above; pick NIM model. Gemini second preset via same adapter.
 - [x] M1 (I1) Rust workspace scaffold: binary crate, CLI stub, CI skeleton (fmt/clippy/test) for macOS and Linux.
 
 ```
@@ -321,6 +321,35 @@ Not checked:
 - [ ] A7 Tier 2 PageRank (CBU §4.4 evidence first).
 
 ## Current
-M0–M13 merged to main. Stored credentials (`devcode auth login/list/logout`, `/connect`) work live with NIM on macOS. Live results: docs/research/first-live-runs.md (RES-012).
-Next candidates (not started): second provider (Gemini) live run; a harder task in a real repo; TUI login modal and approval panels; debug/security profiles; peer comparison for tokens per task.
-Not built: debug/security profiles, Windows, installer, audit-log anchors, product name.
+M0–M13 merged to main. Auth + NIM live (RES-012). A ratatui TUI already exists (`src/tui/`); peers show gaps (no scroll pin, no stream buffer, flat tools, no palette). **Do not rewrite** — harden in order below.
+
+## TUI harden (peer-quality; one at a time; TDD)
+Rule: write failing tests first; `cargo fmt --check`, `clippy -D warnings`, `cargo test`; no speculative redesign; no OpenTUI/pi-tui port.
+
+- [x] **U1 Scroll pin + follow** — worker events no longer reset scroll; Ctrl-End jumps to latest; tests `worker_progress_*`, `ctrl_end_jumps_to_latest_when_pinned`.
+- [x] **U2 Streaming assistant row** — merge assistant progress into one trailing bubble (`merge_assistant_progress`); 7 unit tests. SSE deferred.
+- [x] **U3 Tool cards** — Ctrl-T expand/collapse latest bordered tool card; view + app tests.
+- [x] **U4 Diff modal viewport** — clamp approve/confirm scroll on draw; 6 tests (view + app).
+- [x] **U5 Command palette** — Ctrl-K `PickKind::Command`; filter + Enter → `slash()`; 5 tests.
+- [x] **U6 Fuzzy model picker** — in-repo `tui/fuzzy.rs` scorer; all pickers ranked; 8 tests.
+- [x] **U7 Working status strip** — `footer_status_left`: idle / working / blocked; 4 tests.
+- [x] **U8 Multiline input** — Shift/Alt+Enter newline; height 3–8; Enter submits; HELP updated.
+
+## Current
+TUI harden **U1–U12 complete**. Provider switching track closed for code path:
+
+- [x] **P1** CLI `--provider` accepts every `PRESETS` name (`nim`, `gemini`); `apply_named_preset` switches connector/URL/key env.
+- [x] **P2** Gemini preset uses `GEMINI_API_KEY` (same env pattern as NIM).
+- [x] **P3** Plain REPL `/provider` `/model` `/effort` (parity with TUI Session API; peers: pi `/model` `/thinking`, opencode `/models`).
+- [x] **P4** `gemini_smoke` live test (`#[ignore]`, same shape as `nim_smoke`).
+
+- [x] **P5** `gemini_smoke` live passed (list_models + tool call; 2026-11-25).
+- [x] **P6** TUI dogfood checklist D1–D14 (`tests/m19_tui_dogfood.rs` + live `--plain`); note `docs/research/tui-dogfood-and-harder-task.md` (RES-013).
+- [x] **P7** Harder multi-file Gemini build: 7 steps, 1 source edit, tests red→green (RES-013 D14).
+- [x] **P8** Preset default model `gemini-3-flash-preview` (was `gemini-3.8-flash`, often 503).
+- [x] **P9** Auto model catalog: prefetch on TUI startup / `/connect` / `/provider` / `/init` reload; cache on `App.models`; `/model` opens from cache (peers: opencode `/models`, pi `/model`).
+
+Next: deferred A1–A7 (Windows, debug/security, audit anchors, installer, product name, ATE languages, PageRank). Optional: ignore `__pycache__` in command-change counting (RES-013 #3).
+
+## After MVP (deferred)
+Not started: debug/security; Windows; installer; audit anchors; product name; peer token comparison; `__pycache__` reconcile noise.
