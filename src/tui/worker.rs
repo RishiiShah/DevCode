@@ -194,9 +194,10 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
                     let _ = events.send(Ev::Provider(session.provider_label()));
                     // A switch without a stored key works until the first request; say so now.
                     let stored = session.connections().unwrap_or_default();
-                    let has_key = stored
-                        .iter()
-                        .any(|line| line.starts_with(&format!("{name} ")));
+                    let has_key = stored.iter().any(|line| {
+                        line.starts_with(&format!("{name} "))
+                            || line.starts_with(&format!("{name}:"))
+                    });
                     let env_set = crate::config::preset(&name).is_some_and(|p| {
                         !p.api_key_env.is_empty() && std::env::var(p.api_key_env).is_ok()
                     });

@@ -72,6 +72,8 @@ pub enum AuthCommand {
         #[arg(long)]
         oauth: bool,
     },
+    /// Select a stored credential. Does not change the provider.
+    Switch { name: String },
     /// List stored connector names
     List,
     /// Remove a connector credential

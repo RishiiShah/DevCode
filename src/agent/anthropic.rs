@@ -43,23 +43,28 @@ impl Anthropic {
             Some(key) => key,
             None if config.connector.is_none() && config.api_key_env.is_empty() => String::new(),
             None => {
-                let stored = if let Some(name) = &config.connector {
+                let (label, stored) = if let Some(name) = &config.connector {
                     let dir = crate::credentials::config_dir()
                         .map_err(|e| ModelError::Other(e.to_string()))?;
                     let root =
                         std::env::current_dir().map_err(|e| ModelError::Other(e.to_string()))?;
                     crate::credentials::ensure_outside_workspace(&root, &dir)
                         .map_err(|e| ModelError::Other(e.to_string()))?;
-                    crate::credentials::load(&dir)
-                        .map_err(|e| ModelError::Other(e.to_string()))?
-                        .remove(name)
+                    let stored = crate::credentials::stored_key(&dir, name)
+                        .map_err(|e| ModelError::Other(e.to_string()))?;
+                    let label = if stored.as_ref().is_some_and(|key| !key.is_empty()) {
+                        name.clone()
+                    } else {
+                        crate::credentials::selected_slot_name(&dir, name)
+                            .map_err(|e| ModelError::Other(e.to_string()))?
+                    };
+                    (label, stored)
                 } else {
-                    None
+                    ("NAME".to_owned(), None)
                 };
                 stored.filter(|key| !key.is_empty()).ok_or_else(|| {
                     ModelError::Other(format!(
-                        "run `devcode auth login {}` or set {}",
-                        config.connector.as_deref().unwrap_or("NAME"),
+                        "run `devcode auth login {label}` or set {}",
                         if config.api_key_env.is_empty() {
                             "API_KEY_ENV"
                         } else {

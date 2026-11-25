@@ -242,11 +242,14 @@ impl Session {
         credentials::ensure_outside_workspace(&self.root, &dir)
             .map_err(|e| DevCodeError::Config(e.to_string()))?;
         let entries = credentials::load(&dir).map_err(|e| DevCodeError::Config(e.to_string()))?;
-        let active = self
+        let settings = crate::settings::load_user_settings(&dir)
+            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        let connector = self
             .config
             .provider
             .as_ref()
             .and_then(|p| p.connector.as_deref());
+        let active = settings.active_slot.as_deref().or(connector);
         Ok(credentials::account_lines(&entries, active))
     }
     pub fn connect(&mut self, name: Option<&str>) -> Result<(), DevCodeError> {
@@ -281,6 +284,8 @@ impl Session {
             .map(str::to_owned)
             .or_else(|| provider.connector.clone())
             .ok_or_else(|| DevCodeError::Config("connector name required".into()))?;
+        let named_slot = credentials::parse_slot(&name).is_some();
+        let connector = credentials::connector_of(&name).to_owned();
         let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
         credentials::ensure_outside_workspace(&self.root, &dir)
             .map_err(|e| DevCodeError::Config(e.to_string()))?;
@@ -292,9 +297,14 @@ impl Session {
         }
         entries.insert(name.clone(), key);
         credentials::save(&dir, &entries).map_err(|e| DevCodeError::Config(e.to_string()))?;
-        provider.connector = Some(name);
+        provider.connector = Some(connector);
         // Match /provider: remember this account as the user default (best-effort).
+        // Slot selection follows that write so persist_provider cannot drop it.
         let _ = crate::settings::persist_provider(&dir, &provider);
+        if named_slot {
+            crate::settings::set_active_slot(&dir, Some(&name))
+                .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        }
         self.model = build_model(provider.clone())?;
         self.config.provider = Some(provider);
         Ok(())
@@ -410,15 +420,35 @@ fn auth(
         credentials::load(&absolute).map_err(|e| DevCodeError::Config(e.to_string()))?;
     match action {
         cli::AuthCommand::List => {
+            let settings = crate::settings::load_user_settings(&absolute)
+                .map_err(|e| DevCodeError::Config(e.to_string()))?;
             let configured = resolve_config(root, cli)
                 .ok()
                 .and_then(|c| c.provider)
                 .and_then(|p| p.connector);
-            Ok(credentials::account_lines(&entries, configured.as_deref()))
+            let active = settings.active_slot.as_deref().or(configured.as_deref());
+            Ok(credentials::account_lines(&entries, active))
+        }
+        cli::AuthCommand::Switch { name } => {
+            if !entries.contains_key(name) {
+                return Err(DevCodeError::Config(format!(
+                    "no stored credential for {name}"
+                )));
+            }
+            crate::settings::set_active_slot(&absolute, Some(name))
+                .map_err(|e| DevCodeError::Config(e.to_string()))?;
+            Ok(vec![format!("active {name}")])
         }
         cli::AuthCommand::Logout { name } => {
-            if entries.remove(name).is_some() {
+            let removed = entries.remove(name).is_some();
+            if removed {
                 credentials::save(&absolute, &entries)
+                    .map_err(|e| DevCodeError::Config(e.to_string()))?;
+            }
+            let settings = crate::settings::load_user_settings(&absolute)
+                .map_err(|e| DevCodeError::Config(e.to_string()))?;
+            if settings.active_slot.as_deref() == Some(name.as_str()) {
+                crate::settings::set_active_slot(&absolute, None)
                     .map_err(|e| DevCodeError::Config(e.to_string()))?;
             }
             Ok(Vec::new())

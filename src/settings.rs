@@ -13,6 +13,9 @@ pub struct UserSettings {
     pub provider: Option<ProviderConfig>,
     #[serde(default)]
     pub default_provider: Option<String>,
+    /// Selected credential key (`nim` or `nim:work`). Absent means the plain connector key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_slot: Option<String>,
 }
 
 impl UserSettings {
@@ -105,4 +108,46 @@ pub fn persist_provider(dir: &Path, provider: &ProviderConfig) -> Result<(), Set
     settings.provider = Some(provider.clone());
     settings.default_provider = None;
     save_user_settings(dir, &settings)
+}
+
+pub fn set_active_slot(dir: &Path, slot: Option<&str>) -> Result<(), SettingsError> {
+    let mut settings = load_user_settings(dir)?;
+    settings.active_slot = slot.map(str::to_owned);
+    save_user_settings(dir, &settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::provider_from_preset;
+
+    #[test]
+    fn persist_provider_keeps_active_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("settings.json"), "{}\n").unwrap();
+        assert!(load_user_settings(dir.path())
+            .unwrap()
+            .active_slot
+            .is_none());
+
+        let nim = provider_from_preset("nim").unwrap();
+        save_user_settings(
+            dir.path(),
+            &UserSettings {
+                provider: Some(nim),
+                default_provider: Some("gemini".into()),
+                active_slot: Some("nim:work".into()),
+            },
+        )
+        .unwrap();
+        let gemini = provider_from_preset("gemini").unwrap();
+        persist_provider(dir.path(), &gemini).unwrap();
+        let loaded = load_user_settings(dir.path()).unwrap();
+        assert_eq!(loaded.active_slot.as_deref(), Some("nim:work"));
+        assert_eq!(
+            loaded.provider.unwrap().connector.as_deref(),
+            Some("gemini")
+        );
+        assert!(loaded.default_provider.is_none());
+    }
 }

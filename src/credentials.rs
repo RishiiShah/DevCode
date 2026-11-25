@@ -276,8 +276,67 @@ impl SecretBlob for OsKeyring {
     }
 }
 
+/// `Some((connector, alias))` when `name` is `connector:alias`.
+/// Alias is `[A-Za-z0-9_-]+`. Plain names and anything else are `None`.
+pub fn parse_slot(name: &str) -> Option<(&str, &str)> {
+    let (base, alias) = name.split_once(':')?;
+    if base.is_empty()
+        || alias.is_empty()
+        || alias.contains(':')
+        || !alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some((base, alias))
+}
+
+/// Base connector for a stored key. `nim:work` is `nim`; a plain name is unchanged.
+pub fn connector_of(name: &str) -> &str {
+    parse_slot(name).map(|(base, _)| base).unwrap_or(name)
+}
+
+fn slot_selects(slot: &str, connector: &str) -> bool {
+    slot == connector || matches!(parse_slot(slot), Some((base, _)) if base == connector)
+}
+
+/// Map key `stored_key` reads for `connector`.
+/// `active_slot` of `connector` or `connector:alias` selects that exact key.
+pub fn selected_key<'a>(active_slot: Option<&'a str>, connector: &'a str) -> &'a str {
+    match active_slot {
+        Some(slot) if slot_selects(slot, connector) => slot,
+        _ => connector,
+    }
+}
+
+fn read_active_slot(dir: &Path) -> io::Result<Option<String>> {
+    crate::settings::load_user_settings(dir)
+        .map(|settings| settings.active_slot)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+/// Credential name selected for `connector` (`nim:work` or the plain connector).
+pub fn selected_slot_name(dir: &Path, connector: &str) -> io::Result<String> {
+    let active = read_active_slot(dir)?;
+    Ok(selected_key(active.as_deref(), connector).to_owned())
+}
+
+/// Stored API key for `connector`.
+/// When `active_slot` is `connector` or `connector:alias`, that exact entry is used
+/// and a missing entry does not fall back to the plain key. Otherwise the plain key.
+pub fn stored_key(dir: &Path, connector: &str) -> io::Result<Option<String>> {
+    let active = read_active_slot(dir)?;
+    let name = selected_key(active.as_deref(), connector);
+    Ok(load(dir)?
+        .get(name)
+        .filter(|value| !value.is_empty())
+        .cloned())
+}
+
 /// Account rows for `/connections` and `auth list` (OpenCode-style source column).
-/// Never includes key material. Active connector is marked with ` *`.
+/// Never includes key material. The selected credential is marked with ` *`.
+/// Named slots (`nim:work`) are `stored`, not custom.
 pub fn account_lines(entries: &BTreeMap<String, String>, active: Option<&str>) -> Vec<String> {
     let mut lines = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -310,7 +369,11 @@ pub fn account_lines(entries: &BTreeMap<String, String>, active: Option<&str>) -
         } else {
             ""
         };
-        lines.push(format!("{name}  stored (custom){mark}"));
+        if parse_slot(name).is_some() {
+            lines.push(format!("{name}  stored{mark}"));
+        } else {
+            lines.push(format!("{name}  stored (custom){mark}"));
+        }
     }
     lines
 }
@@ -541,6 +604,124 @@ mod tests {
             }
             Classified::Missing | Classified::Hard(_) => panic!("ambiguous must be unavailable"),
         }
+    }
+
+    #[test]
+    fn parse_slot_requires_one_alias() {
+        assert_eq!(parse_slot("nim:work"), Some(("nim", "work")));
+        assert_eq!(parse_slot("nim:Work_1-a"), Some(("nim", "Work_1-a")));
+        assert_eq!(connector_of("nim:work"), "nim");
+        assert_eq!(connector_of("custom-lab"), "custom-lab");
+        assert_eq!(parse_slot("nim"), None);
+        assert_eq!(parse_slot("nim:"), None);
+        assert_eq!(parse_slot(":work"), None);
+        assert_eq!(parse_slot("nim:work:extra"), None);
+        assert_eq!(parse_slot("nim:bad alias"), None);
+    }
+
+    #[test]
+    fn selected_key_matches_connector_slot_only() {
+        assert_eq!(selected_key(None, "nim"), "nim");
+        assert_eq!(selected_key(Some("nim"), "nim"), "nim");
+        assert_eq!(selected_key(Some("nim:work"), "nim"), "nim:work");
+        assert_eq!(selected_key(Some("gemini:work"), "nim"), "nim");
+        assert_eq!(selected_key(Some("nim:work:extra"), "nim"), "nim");
+        assert_eq!(selected_key(Some("nim:bad alias"), "nim"), "nim");
+    }
+
+    #[test]
+    fn stored_key_reads_the_selected_slot_without_fallthrough() {
+        std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
+        let dir = tempfile::tempdir().unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("nim".into(), "plain-secret".into());
+        entries.insert("nim:work".into(), "slot-secret".into());
+        save(dir.path(), &entries).unwrap();
+        assert_eq!(
+            stored_key(dir.path(), "nim").unwrap().as_deref(),
+            Some("plain-secret")
+        );
+
+        crate::settings::save_user_settings(
+            dir.path(),
+            &crate::settings::UserSettings {
+                active_slot: Some("nim:work".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(selected_slot_name(dir.path(), "nim").unwrap(), "nim:work");
+        assert_eq!(
+            stored_key(dir.path(), "nim").unwrap().as_deref(),
+            Some("slot-secret")
+        );
+
+        entries.remove("nim:work");
+        save(dir.path(), &entries).unwrap();
+        assert_eq!(stored_key(dir.path(), "nim").unwrap(), None);
+
+        crate::settings::save_user_settings(
+            dir.path(),
+            &crate::settings::UserSettings {
+                active_slot: Some("gemini:work".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stored_key(dir.path(), "nim").unwrap().as_deref(),
+            Some("plain-secret")
+        );
+    }
+
+    #[test]
+    fn account_lines_mark_only_the_selected_slot() {
+        let mut entries = BTreeMap::new();
+        entries.insert("nim".into(), "plain-secret".into());
+        entries.insert("nim:work".into(), "slot-secret".into());
+        entries.insert("custom-lab".into(), "custom-secret".into());
+        let selected = account_lines(&entries, Some("nim:work"));
+        assert!(
+            selected
+                .iter()
+                .any(|l| l.starts_with("nim:work  stored") && l.contains('*')),
+            "{selected:?}"
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|l| l.starts_with("nim  ") && !l.contains('*')),
+            "{selected:?}"
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|l| l.starts_with("custom-lab  stored (custom)") && !l.contains('*')),
+            "{selected:?}"
+        );
+        assert!(
+            !selected
+                .iter()
+                .any(|l| l.contains("nim:work") && l.contains("custom")),
+            "{selected:?}"
+        );
+        let plain = account_lines(&entries, Some("nim"));
+        assert!(
+            plain
+                .iter()
+                .any(|l| l.starts_with("nim  ") && l.contains('*')),
+            "{plain:?}"
+        );
+        assert!(
+            plain
+                .iter()
+                .any(|l| l.starts_with("nim:work  stored") && !l.contains('*')),
+            "{plain:?}"
+        );
+        let text = selected.join("\n");
+        assert!(!text.contains("plain-secret"));
+        assert!(!text.contains("slot-secret"));
+        assert!(!text.contains("custom-secret"));
     }
 
     #[test]

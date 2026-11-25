@@ -43,8 +43,9 @@ Where does DevCode lag peers on connecting provider accounts (Codex / Claude / G
 5. **P10a landed partial:** native Messages adapter `src/agent/anthropic.rs` + preset `anthropic`. Fake-server green (`m20_anthropic`). Still behind OpenCode/pi on OAuth, SSE-only stream, and beta feature headers.
 6. **P10b landed partial:** `auth login gemini --oauth` paste-code Google OAuth (`src/auth.rs`) writes `oauth-gemini.json` (access + refresh + expiry) and leaves the API key in `credentials.json` alone. Not wired into `openai_compat` / Code Assist yet. Fake-server tests `m21_oauth`.
 7. **P10c landed partial:** opt-in `DEVCODE_CREDENTIALS_STORE=auto` tries the OS keyring then `credentials.json`; unset or `file` stays file-only. Tests use an in-memory blob.
+8. **P10d landed partial:** named credential slots (`nim`, `nim:work`) and `auth switch` via `UserSettings.active_slot` (`tests/m22_auth_switch.rs`). `/connect nim:work` stores that key and selects it. One keyring blob.
 
-**Do not mark P10 / P10a / P10b / P10c done** until peer bar in TODO is met.
+**Do not mark P10 / P10a / P10b / P10c / P10d done** until peer bar in TODO is met.
 
 ## Open to reach peer level
 
