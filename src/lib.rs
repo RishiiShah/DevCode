@@ -123,6 +123,14 @@ impl Session {
         self.config.provider = Some(provider);
         warning
     }
+    /// Effort values the current model accepts (empty: none selectable).
+    pub fn effort_levels(&self) -> Vec<String> {
+        self.config
+            .provider
+            .as_ref()
+            .map(|p| p.effort_levels().into_iter().map(String::from).collect())
+            .unwrap_or_default()
+    }
     pub fn list_models(&self) -> Result<Vec<String>, DevCodeError> {
         self.model
             .list_models()
@@ -138,6 +146,15 @@ impl Session {
             return Err(DevCodeError::Config("model id cannot be empty".into()));
         }
         provider.model = id.to_owned();
+        // An effort the new model does not accept would make every request fail.
+        let still_valid = provider
+            .extra_body
+            .get("reasoning_effort")
+            .and_then(|v| v.as_str())
+            .is_none_or(|e| provider.effort_levels().contains(&e));
+        if !still_valid {
+            provider.extra_body.remove("reasoning_effort");
+        }
         Ok(self.apply_provider(provider))
     }
     /// Switches to a preset provider with its default model. Session only.
@@ -176,15 +193,22 @@ impl Session {
             None => {
                 provider.extra_body.remove("reasoning_effort");
             }
-            Some(l) if matches!(l, "low" | "medium" | "high") => {
+            Some(l) if provider.effort_levels().contains(&l) => {
                 provider
                     .extra_body
                     .insert("reasoning_effort".into(), serde_json::json!(l));
             }
             Some(other) => {
-                return Err(DevCodeError::Config(format!(
-                    "unknown effort '{other}'; use low, medium, high or default"
-                )))
+                let levels = provider.effort_levels();
+                return Err(DevCodeError::Config(if levels.is_empty() {
+                    format!("{} has no selectable reasoning effort", provider.model)
+                } else {
+                    format!(
+                        "{} does not take effort '{other}'; choose default or {}",
+                        provider.model,
+                        levels.join(", ")
+                    )
+                }));
             }
         }
         Ok(self.apply_provider(provider))

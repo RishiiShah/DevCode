@@ -22,6 +22,7 @@ pub enum Cmd {
     /// Re-read `.devcode.json` (after `/init` wrote it).
     Reload,
     ListModels,
+    ListEfforts,
     SetModel(String),
     SetProvider(String),
     /// `None` clears the effort setting.
@@ -40,6 +41,8 @@ pub enum Ev {
     /// Provider label after a connect, reload or switch.
     Provider(String),
     Models(Result<Vec<String>, String>),
+    /// Effort values the current model accepts (empty: none).
+    Efforts(Vec<String>),
 }
 
 pub struct ChannelWriter(pub Sender<Ev>);
@@ -163,6 +166,9 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
         }
         Cmd::ListModels => {
             let _ = events.send(Ev::Models(session.list_models().map_err(|e| e.to_string())));
+        }
+        Cmd::ListEfforts => {
+            let _ = events.send(Ev::Efforts(session.effort_levels()));
         }
         Cmd::SetModel(id) => {
             let result = session.set_model(&id);

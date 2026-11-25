@@ -8,7 +8,7 @@ fn provider(connector: &str, base_url: &str) -> ProviderConfig {
         base_url: base_url.into(),
         api_key_env: String::new(),
         connector: Some(connector.into()),
-        model: "old-model".into(),
+        model: "gemini-3.8-flash".into(),
         context_window: 1234,
         max_rpm: None,
         extra_body: Default::default(),
@@ -41,14 +41,26 @@ fn switching_provider_model_and_effort() {
     let mut s = session(root.path(), Some(gemini));
     let warning = s.set_effort(Some("high")).unwrap();
     assert!(warning.is_some(), "no stored key, so a warning is expected");
-    assert_eq!(s.provider_label(), "gemini · old-model · effort high");
+    assert_eq!(
+        s.provider_label(),
+        "gemini · gemini-3.8-flash · effort high"
+    );
     assert!(s.set_effort(Some("extreme")).is_err());
+    assert_eq!(s.effort_levels(), ["minimal", "low", "medium", "high"]);
     s.set_effort(None).unwrap();
-    assert_eq!(s.provider_label(), "gemini · old-model");
+    assert_eq!(s.provider_label(), "gemini · gemini-3.8-flash");
 
-    // Model switch keeps the provider.
+    // A pro model has fewer levels; an effort it rejects is dropped on switch.
+    s.set_effort(Some("minimal")).unwrap();
+    s.set_model("gemini-3-pro-preview").unwrap();
+    assert_eq!(s.provider_label(), "gemini · gemini-3-pro-preview");
+    assert_eq!(s.effort_levels(), ["low", "high"]);
+    assert!(s.set_effort(Some("medium")).is_err());
+    // Unknown model ids offer no effort rather than a guess.
     s.set_model("gemini-x").unwrap();
-    assert_eq!(s.provider_label(), "gemini · gemini-x");
+    assert!(s.effort_levels().is_empty());
+    assert!(s.set_effort(Some("low")).is_err());
+    s.set_model("gemini-3.8-flash").unwrap();
     assert!(s.set_model("  ").is_err());
 
     // Provider switch uses the preset's default model and drops provider-specific options.

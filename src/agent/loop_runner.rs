@@ -42,6 +42,27 @@ impl std::fmt::Debug for ProgressSink {
     }
 }
 
+/// Up to three non-empty lines of a tool result, each cut to 110 chars, indentation kept.
+fn preview_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut out: Vec<String> = lines
+        .iter()
+        .take(3)
+        .map(|l| {
+            let l = l.replace('\t', "    ");
+            if l.chars().count() > 110 {
+                format!("{}…", l.chars().take(110).collect::<String>())
+            } else {
+                l
+            }
+        })
+        .collect();
+    if lines.len() > 3 {
+        out.push(format!("… {} more lines", lines.len() - 3));
+    }
+    out.join("\n")
+}
+
 fn short(text: &str, max: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= max {
@@ -400,7 +421,7 @@ fn run_loop(
             limits.emit(ProgressEvent::ToolResult {
                 name: call.name.clone(),
                 ok: tool_ok,
-                preview: short(&observation, 160),
+                preview: preview_lines(&observation),
             });
             output_bytes += observation.len();
             messages.push(Message::tool(observation, &call.id));

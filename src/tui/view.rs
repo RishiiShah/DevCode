@@ -37,10 +37,24 @@ fn profile_color(profile: Profile) -> Color {
     }
 }
 
+/// `~` for the home directory, and only the last two components when the path is long.
+fn short_path(path: &std::path::Path) -> String {
+    let shown = match std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        Some(home) if path.starts_with(&home) => {
+            format!("~/{}", path.strip_prefix(&home).unwrap_or(path).display())
+        }
+        _ => path.display().to_string(),
+    };
+    let parts: Vec<&str> = shown.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() > 3 {
+        format!("…/{}", parts[parts.len() - 2..].join("/"))
+    } else {
+        shown
+    }
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    let cwd = short_path(&std::env::current_dir().unwrap_or_default());
     let line = Line::from(vec![
         Span::styled(
             " DevCode ",
@@ -76,9 +90,7 @@ fn transcript_lines(items: &[Item]) -> Vec<Line<'static>> {
             }
             Item::Assistant(text) => {
                 lines.push(Line::raw(""));
-                for l in text.lines() {
-                    lines.push(Line::raw(l.to_string()));
-                }
+                lines.extend(super::markdown::render(text));
             }
             Item::Tool { name, summary } => lines.push(Line::from(vec![
                 Span::styled("  ⚙ ", dim),
@@ -91,10 +103,14 @@ fn transcript_lines(items: &[Item]) -> Vec<Line<'static>> {
                 } else {
                     ("✗", Color::Red)
                 };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("    {mark} "), Style::new().fg(color)),
-                    Span::styled(preview.clone(), dim),
-                ]));
+                for (i, text) in preview.lines().enumerate() {
+                    let lead = if i == 0 {
+                        Span::styled(format!("    {mark} "), Style::new().fg(color))
+                    } else {
+                        Span::raw("      ")
+                    };
+                    lines.push(Line::from(vec![lead, Span::styled(text.to_string(), dim)]));
+                }
             }
             Item::Info(text) => lines.push(Line::styled(
                 format!("  {text}"),
@@ -212,7 +228,13 @@ fn diff_lines(text: &str) -> Vec<Line<'static>> {
 
 fn draw_modal(frame: &mut Frame, screen: Rect, app: &App) {
     let Some(modal) = &app.modal else { return };
-    let area = centered(screen, 90, 75);
+    let mut area = centered(screen, 90, 75);
+    if let Modal::Picker { items, .. } = modal {
+        // Fit the list: header rows plus items, never taller than the default size.
+        let rows = modal.visible().len().min(items.len()).max(1) as u16;
+        area.height = (rows + 6).clamp(8, area.height.max(8)).min(screen.height);
+        area.y = screen.y + (screen.height.saturating_sub(area.height)) / 2;
+    }
     frame.render_widget(Clear, area);
     let (title, body, hint, scroll): (&str, Vec<Line>, &str, u16) = match modal {
         Modal::Approve { text, scroll } => (

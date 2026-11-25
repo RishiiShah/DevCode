@@ -119,7 +119,7 @@ const HELP: &str = "Enter       send message or command
 /ask /plan /build   switch profile (ask and plan are read-only)
 /model [ID]         pick a model (listed by the provider) or set one
 /provider [NAME]    switch provider: nim or gemini (this session only)
-/effort [LEVEL]     reasoning effort: default, low, medium, high (gemini only)
+/effort [LEVEL]     reasoning effort; lists only what the current model accepts
 /connect [NAME]     store an API key (masked input)
 /connections        list stored connections
 /init [nim|gemini]  write .devcode.json for this folder
@@ -192,6 +192,27 @@ impl App {
                 self.items.push(Item::Info(format!("now using {label}")));
                 self.provider = label;
             }
+            Ev::Efforts(levels) => {
+                if matches!(
+                    self.modal,
+                    Some(Modal::Picker {
+                        kind: PickKind::Effort,
+                        ..
+                    })
+                ) {
+                    if levels.is_empty() {
+                        self.modal = None;
+                        self.items.push(Item::Info(
+                            "this model has no selectable reasoning effort".into(),
+                        ));
+                    } else if let Some(Modal::Picker { items, loading, .. }) = &mut self.modal {
+                        *items = std::iter::once("default".to_string())
+                            .chain(levels)
+                            .collect();
+                        *loading = false;
+                    }
+                }
+            }
             Ev::Models(result) => match (&mut self.modal, result) {
                 (
                     Some(Modal::Picker {
@@ -247,13 +268,35 @@ impl App {
         self.total_out += result.total_output_tokens;
         self.run_in = 0;
         self.run_out = 0;
-        if let Some(v) = &result.verification {
+        // Verification details matter only when something changed.
+        let changed = result
+            .summary
+            .as_ref()
+            .is_some_and(|s| s.files_edited > 0 || s.files_changed_by_commands > 0);
+        if let Some(v) = result.verification.as_ref().filter(|_| changed) {
             for line in v.lines().filter(|l| !l.trim().is_empty()) {
                 self.items.push(Item::Note(line.to_string()));
             }
         }
         if let Some(s) = &result.summary {
-            self.items.push(Item::Note(s.format_line()));
+            let mut parts = vec![
+                format!("{} step{}", s.steps, if s.steps == 1 { "" } else { "s" }),
+                format!("{} in / {} out tokens", s.tokens_in, s.tokens_out),
+            ];
+            let counts = [
+                (s.files_edited, "file(s) edited"),
+                (s.tests_changed, "test file(s) changed"),
+                (s.files_changed_by_commands, "file(s) changed by commands"),
+                (s.files_outside_scope, "outside scope"),
+                (s.dependencies_added, "dependencies added"),
+            ];
+            parts.extend(
+                counts
+                    .iter()
+                    .filter(|(n, _)| *n > 0)
+                    .map(|(n, what)| format!("{n} {what}")),
+            );
+            self.items.push(Item::Note(parts.join(" · ")));
         }
         if let Some((path, count)) = &result.no_progress {
             self.items.push(Item::Error(format!(
@@ -739,11 +782,15 @@ impl App {
                 Vec::new()
             }
             _ => {
-                let levels = ["default", "low", "medium", "high"]
-                    .map(String::from)
-                    .to_vec();
-                self.modal = Some(picker(PickKind::Effort, levels, false));
-                Vec::new()
+                if self.provider == "no provider" {
+                    self.items.push(Item::Error(
+                        "No provider yet. Run /provider nim or /provider gemini first.".into(),
+                    ));
+                    return Vec::new();
+                }
+                // The worker knows the model, so it says which levels exist.
+                self.modal = Some(picker(PickKind::Effort, Vec::new(), true));
+                vec![Action::Send(Cmd::ListEfforts)]
             }
         }
     }
@@ -998,7 +1045,13 @@ mod tests {
             total_input_tokens: 10,
             total_output_tokens: 4,
             messages: Vec::new(),
-            summary: None,
+            summary: Some(crate::discipline::TaskSummary {
+                steps: 3,
+                tokens_in: 10,
+                tokens_out: 4,
+                files_edited: 1,
+                ..Default::default()
+            }),
             verification: Some("Verification Summary: ok\n".into()),
             no_progress: None,
         })));
@@ -1010,6 +1063,9 @@ mod tests {
         assert!(a
             .items
             .contains(&Item::Note("Verification Summary: ok".into())));
+        assert!(a.items.contains(&Item::Note(
+            "3 steps · 10 in / 4 out tokens · 1 file(s) edited".into()
+        )));
     }
 
     #[test]
@@ -1094,6 +1150,33 @@ mod tests {
         assert!(
             matches!(&a.on_key(key(KeyCode::Enter))[..], [Action::Send(Cmd::SetProvider(p))] if p == "gemini")
         );
+    }
+
+    #[test]
+    fn effort_picker_shows_only_levels_the_model_accepts() {
+        let mut a = app();
+        type_str(&mut a, "/effort");
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(&actions[..], [Action::Send(Cmd::ListEfforts)]));
+        a.on_event(Ev::Efforts(vec!["low".into(), "high".into()]));
+        assert_eq!(picker(&a).visible(), vec!["default", "low", "high"]);
+        a.on_key(key(KeyCode::Down));
+        a.on_key(key(KeyCode::Down));
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(&actions[..], [Action::Send(Cmd::SetEffort(Some(l)))] if l == "high"));
+    }
+
+    #[test]
+    fn effort_picker_closes_when_model_has_no_levels() {
+        let mut a = app();
+        type_str(&mut a, "/effort");
+        a.on_key(key(KeyCode::Enter));
+        a.on_event(Ev::Efforts(Vec::new()));
+        assert!(a.modal.is_none());
+        assert!(a
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Info(t) if t.contains("no selectable"))));
     }
 
     #[test]

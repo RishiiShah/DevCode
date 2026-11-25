@@ -193,6 +193,37 @@ pub fn preset(name: &str) -> Option<&'static Preset> {
 }
 
 impl ProviderConfig {
+    /// Reasoning-effort values this model accepts on the Gemini endpoint; empty when none.
+    /// Taken from Google's OpenAI-compatibility table (cached copies disagree); not verified live.
+    /// Unknown models get none rather than a guess that could produce a 400.
+    pub fn effort_levels(&self) -> Vec<&'static str> {
+        if !self.supports_effort() {
+            return Vec::new();
+        }
+        let m = self.model.as_str();
+        let flash = m.contains("flash");
+        let pro = m.contains("pro");
+        if m.starts_with("gemini-3") {
+            if pro {
+                vec!["low", "high"]
+            } else if flash {
+                vec!["minimal", "low", "medium", "high"]
+            } else {
+                Vec::new()
+            }
+        } else if m.starts_with("gemini-2.5") {
+            if pro {
+                vec!["low", "medium", "high"]
+            } else if flash {
+                vec!["none", "low", "medium", "high"]
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    }
+
     /// True when the backend takes `reasoning_effort` on chat completions (Gemini's endpoint).
     pub fn supports_effort(&self) -> bool {
         self.connector.as_deref() == Some("gemini")

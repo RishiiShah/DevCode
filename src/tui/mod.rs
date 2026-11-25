@@ -3,6 +3,7 @@
 //! The UI thread owns the terminal. A worker thread owns the `Session`. Approval questions
 //! flow worker -> UI as text, answers flow UI -> worker as lines (see `worker`).
 pub mod app;
+pub mod markdown;
 pub mod view;
 pub mod worker;
 
