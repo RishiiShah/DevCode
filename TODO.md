@@ -340,11 +340,11 @@ MVP harness M0–M13 is on main (CLI loop, guard, manifest/rollback, gate, appro
 | P4–P5 | partial | `gemini_smoke` / `nim_smoke` (ignored live) | Not a peer bake-off; smoke ≠ product auth UX |
 | P8 | partial | Default `gemini-3-flash-preview` | Catalog churn; no peer-grade model registry |
 | P9 | partial | Prefetch + `App.models` cache on connect/switch | OpenCode durable model registry / variants |
-| P10 | partial | Account rows stored\|env\|missing; connect persists; `openai` + `openrouter` presets; Gemini paste-code OAuth (access token only) | no refresh, device-code, or other-provider OAuth; no keyring or `auth switch`; Anthropic still partial |
+| P10 | partial | Account rows stored\|env\|missing; connect persists; `openai` + `openrouter` presets; Gemini paste-code OAuth (access token only); opt-in OS keyring (`DEVCODE_CREDENTIALS_STORE=auto`, default file) | no refresh, device-code, or other-provider OAuth; keyring is opt-in only (file default, no Windows); no `auth switch`; Anthropic still partial |
 
 - [ ] **P10a** Native Anthropic Messages adapter — bar: OpenCode/pi (OAuth + always-stream + betas). **Landed (still partial):** `ProviderKind::Anthropic`, `src/agent/anthropic.rs`, preset `anthropic` (`ANTHROPIC_API_KEY`), fake-server tests `m20_anthropic` (7). Missing vs peers: OAuth, forced SSE stream path, beta headers, live keyed dogfood.
 - [ ] **P10b** OAuth / device-code login for at least one provider — bar: Codex / gemini-cli. **Landed (still partial):** paste-code Google OAuth for `gemini` (`src/auth.rs`, `auth login gemini --oauth`) writes `oauth-gemini.json` (access + refresh + expiry); leaves `credentials.json` API key alone. Fake-server tests `m21_oauth`. Missing vs peers: refresh-on-use, Code Assist host wiring, device-code, loopback redirect, other providers, keyring.
-- [ ] **P10c** OS keyring backend (optional file) — bar: Codex / gemini-cli HybridTokenStorage
+- [ ] **P10c** OS keyring backend (optional file) — bar: Codex / gemini-cli HybridTokenStorage. **Landed (still partial):** opt-in `DEVCODE_CREDENTIALS_STORE=auto` tries the OS keyring (service `devcode`, account `credentials`) then `credentials.json`. Unset or `file` stays file-only. Unit tests use an in-memory blob and do not touch the real keychain. Missing vs peers: file remains the default, no Windows backend, `oauth-gemini.json` stays a file, no multi-account keyring.
 - [ ] **P10d** Multi-credential + `auth switch` — bar: OpenCode `auth switch`
 - [ ] **P10e** Decide env-vs-stored precedence vs pi (spec today: env wins)
 
