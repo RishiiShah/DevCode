@@ -3,7 +3,7 @@
 ```
 ================================================================================
 DOCUMENT ID    : DEVCODE-RES-014
-REVISION       : 0.1.0
+REVISION       : 0.2.0
 STATUS         : Working notes
 SOURCES        : references/codex, opencode, pi, gemini-cli, cline; DevCode credentials/auth
 RELATED        : docs/mvp.md M12–M13; RES-013
@@ -34,23 +34,25 @@ Where does DevCode lag peers on connecting provider accounts (Codex / Claude / G
 - `auth login` defaulted CLI name only for `--provider nim`
 - Native Anthropic / OAuth / keyring / multi-profile: mvp.md non-goals
 
-## Gaps closed this pass
+## Narrowed this pass (still PARTIAL vs peers — not done)
 
-1. **Richer account list** — every preset row shows `stored` / `env` / `stored+env` / `missing`, active marked `*` (OpenCode list shape).
-2. **`/connect` persists provider** — calls `persist_provider` after storing the key.
-3. **Login default** — `auth login` accepts any `--provider` preset name, not only nim.
-4. **More OpenAI-compat accounts** — presets `openai` and `openrouter` (Claude models via OpenRouter until a native Anthropic adapter).
+1. Account list rows: `stored` / `env` / `stored+env` / `missing` + active `*` (OpenCode-shaped **list**, not full auth product).
+2. `/connect` best-effort `persist_provider`.
+3. `auth login` defaults from any `--provider` preset.
+4. Presets `openai` + `openrouter` (Claude only via OpenRouter proxy).
 
-## Still deferred (intentional)
+**Do not mark P10 done** until P10a–P10d in TODO match OpenCode/Codex/gemini-cli.
 
-| Gap | Why deferred |
+## Open to reach peer level
+
+| Gap | Peer bar |
 | :--- | :--- |
-| Native Anthropic Messages adapter | mvp.md post-MVP; different wire shape |
-| OAuth / device code | mvp.md M12 non-goal |
-| OS keyring | mvp.md non-goal |
-| Multi-key per connector + `auth switch` | needs credential schema change |
-| Pi-style stored-over-env | DevCode env-first is specified in M12 |
+| Native Anthropic Messages adapter | OpenCode / Cline Anthropic |
+| OAuth / device code | Codex / gemini-cli |
+| OS keyring (optional file) | Codex / gemini-cli |
+| Multi-key per connector + `auth switch` | OpenCode `auth switch` |
+| Stored-vs-env policy revisit | Pi stored-first vs DevCode env-first (M12) |
 
-## Stop condition
+## Stop condition (peer-done)
 
-Account list + connect persist + openai/openrouter presets shipped with tests; deferred gaps recorded here.
+Native or first-class Claude path **and** either OAuth or keyring-backed multi-account switch **and** list/switch UX at OpenCode depth. Until then: **partial**.

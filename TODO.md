@@ -320,37 +320,75 @@ Not checked:
 - [ ] A6 Optional: ATE-1000/ATSE-1000 as named agent-facing and user-facing languages (P1/P3/P4); details not final.
 - [ ] A7 Tier 2 PageRank (CBU §4.4 evidence first).
 
-## Current
-M0–M13 merged to main. Auth + NIM live (RES-012). A ratatui TUI already exists (`src/tui/`); peers show gaps (no scroll pin, no stream buffer, flat tools, no palette). **Do not rewrite** — harden in order below.
+## Current board (honest vs peers)
 
-## TUI harden (peer-quality; one at a time; TDD)
-Rule: write failing tests first; `cargo fmt --check`, `clippy -D warnings`, `cargo test`; no speculative redesign; no OpenTUI/pi-tui port.
+**Done rule:** `[x]` only when the feature **matches or beats** a named peer (codex / opencode / pi / gemini-cli) on the same job. Landed code without peer parity stays **started** or **partial**. Evidence notes (RES-*) record measurements; they do not auto-check boxes.
 
-- [x] **U1 Scroll pin + follow** — worker events no longer reset scroll; Ctrl-End jumps to latest; tests `worker_progress_*`, `ctrl_end_jumps_to_latest_when_pinned`.
-- [x] **U2 Streaming assistant row** — merge assistant progress into one trailing bubble (`merge_assistant_progress`); 7 unit tests. SSE deferred.
-- [x] **U3 Tool cards** — Ctrl-T expand/collapse latest bordered tool card; view + app tests.
-- [x] **U4 Diff modal viewport** — clamp approve/confirm scroll on draw; 6 tests (view + app).
-- [x] **U5 Command palette** — Ctrl-K `PickKind::Command`; filter + Enter → `slash()`; 5 tests.
-- [x] **U6 Fuzzy model picker** — in-repo `tui/fuzzy.rs` scorer; all pickers ranked; 8 tests.
-- [x] **U7 Working status strip** — `footer_status_left`: idle / working / blocked; 4 tests.
-- [x] **U8 Multiline input** — Shift/Alt+Enter newline; height 3–8; Enter submits; HELP updated.
+Peers for the bar: account UX → OpenCode/pi; OAuth/keyring → Codex/gemini-cli; sandbox → Codex; TUI streaming → Codex/gemini-cli; thinking → pi `/thinking`.
 
-## Current
-TUI harden **U1–U12 complete**. Provider switching track closed for code path:
+### Landed (code present; not peer-done)
 
-- [x] **P1** CLI `--provider` accepts every `PRESETS` name (`nim`, `gemini`); `apply_named_preset` switches connector/URL/key env.
-- [x] **P2** Gemini preset uses `GEMINI_API_KEY` (same env pattern as NIM).
-- [x] **P3** Plain REPL `/provider` `/model` `/effort` (parity with TUI Session API; peers: pi `/model` `/thinking`, opencode `/models`).
-- [x] **P4** `gemini_smoke` live test (`#[ignore]`, same shape as `nim_smoke`).
+MVP harness M0–M13 is on main (CLI loop, guard, manifest/rollback, gate, approvals, discipline, NIM live RES-012). That is product scaffolding, not a claim of peer parity.
 
-- [x] **P5** `gemini_smoke` live passed (list_models + tool call; 2026-11-25).
-- [x] **P6** TUI dogfood checklist D1–D14 (`tests/m19_tui_dogfood.rs` + live `--plain`); note `docs/research/tui-dogfood-and-harder-task.md` (RES-013).
-- [x] **P7** Harder multi-file Gemini build: 7 steps, 1 source edit, tests red→green (RES-013 D14).
-- [x] **P8** Preset default model `gemini-3-flash-preview` (was `gemini-3.8-flash`, often 503).
-- [x] **P9** Auto model catalog: prefetch on TUI startup / `/connect` / `/provider` / `/init` reload; cache on `App.models`; `/model` opens from cache (peers: opencode `/models`, pi `/model`).
-- [x] **P10** Account connect (RES-014): richer `/connections`+`auth list` (stored|env|missing, `*` active); `/connect` persists settings; presets `openai` + `openrouter` (Claude via OpenRouter). OAuth/native Anthropic/keyring still deferred.
+### Started / partial — accounts & providers (RES-014)
 
-Next: deferred A1–A7 (Windows, debug/security, audit anchors, installer, product name, ATE languages, PageRank). Optional: ignore `__pycache__` in command-change counting (RES-013 #3).
+| ID | Status | Landed | Still short of peer |
+| :--- | :--- | :--- | :--- |
+| P1 | partial | `--provider` + `apply_named_preset` for presets | OpenCode multi-integration map + switch accounts |
+| P2 | partial | Gemini + NIM env keys | gemini-cli OAuth + keychain |
+| P3 | partial | Plain `/provider` `/model` `/effort` | pi `/thinking` (all providers); effort is Gemini-only |
+| P4–P5 | partial | `gemini_smoke` / `nim_smoke` (ignored live) | Not a peer bake-off; smoke ≠ product auth UX |
+| P8 | partial | Default `gemini-3-flash-preview` | Catalog churn; no peer-grade model registry |
+| P9 | partial | Prefetch + `App.models` cache on connect/switch | OpenCode durable model registry / variants |
+| P10 | partial | Account rows stored\|env\|missing; connect persists; `openai` + `openrouter` presets | **No** OAuth, keyring, `auth switch`, native Claude/Anthropic |
 
-## After MVP (deferred)
-Not started: debug/security; Windows; installer; audit anchors; product name; peer token comparison; `__pycache__` reconcile noise.
+- [ ] **P10a** Native Anthropic Messages adapter (not OpenRouter proxy) — bar: OpenCode/Cline Anthropic
+- [ ] **P10b** OAuth / device-code login for at least one provider — bar: Codex / gemini-cli
+- [ ] **P10c** OS keyring backend (optional file) — bar: Codex / gemini-cli HybridTokenStorage
+- [ ] **P10d** Multi-credential + `auth switch` — bar: OpenCode `auth switch`
+- [ ] **P10e** Decide env-vs-stored precedence vs pi (spec today: env wins)
+
+### Started / partial — TUI (peer-quality; TDD; no OpenTUI port)
+
+| ID | Status | Landed | Still short of peer |
+| :--- | :--- | :--- | :--- |
+| U1 | partial | Scroll pin + Ctrl-End | Full transcript UX vs Codex/opencode |
+| U2 | started | Progress merge into one bubble | **SSE / true token stream** deferred |
+| U3 | partial | Ctrl-T tool cards | Richer tool timeline vs peers |
+| U4 | partial | Diff modal scroll clamp | Codex-level permission/diff chrome |
+| U5 | partial | Ctrl-K command palette | OpenCode slash surface depth |
+| U6 | partial | In-repo fuzzy scorer | Peer fuzzy quality + ranking polish |
+| U7 | partial | Idle/working/blocked strip | |
+| U8 | partial | Shift/Alt+Enter multiline | |
+| U11 | partial | History vs scroll split (keys) | Full-screen ratatui E2E dogfood incomplete (RES-013) |
+| U12 | partial | Identical tool-loop → NoProgress | |
+
+- [ ] **U2a** Real SSE / streaming assistant tokens — bar: Codex / gemini-cli streaming
+- [ ] **U13** Interactive full-screen TUI dogfood with live provider (not only `App` unit + `--plain`) — RES-013 gap
+
+P6/P7 (scripted dogfood + harder Gemini build) = **evidence**, not peer-done checkboxes.
+
+### Started / partial — runtime (not A-list yet)
+
+- [ ] Sandbox = path allowlist + env strip + PGID kill only; **no** Seatbelt/bwrap/Landlock — bar: Codex
+- [ ] Installer scripts exist; **no** minisign / peer-grade signed channel — bar: Codex
+- [ ] Windows native — not started (A1)
+- [ ] `debug` / `security` profiles — not started (A2)
+
+### After MVP (deferred; still open)
+
+- [ ] A1 Windows native: Job Object, path canonicalization, installer `.ps1`
+- [ ] A2 `debug` and `security` profiles; gitleaks/semgrep/osv-scanner
+- [ ] A3 Audit-log truncation anchors; Class A/C classifier depth
+- [ ] A4 Installer + checksums + **minisign** + release host
+- [ ] A5 Product name / claim names
+- [ ] A6 Optional ATE/ATSE languages
+- [ ] A7 Tier 2 PageRank (CBU evidence first)
+- [ ] Ignore `__pycache__` in command-change counting (RES-013 #3)
+- [ ] Peer tokens-per-task comparison
+
+### Next work order (peer bar first)
+
+1. P10a–P10d (accounts to OpenCode/Codex level) **or** U2a (real streaming) — pick one track
+2. Sandbox toward Codex (bwrap/Seatbelt) when accounts/stream track is peer-grade
+3. A4 signing when install path is real
