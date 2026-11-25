@@ -10,6 +10,9 @@ pub enum Profile {
     Build,
 }
 
+/// Shared by every profile: keeps replies short and stops unrequested work.
+const STYLE_RULES: &str = "Style: be brief and direct. Reply to a greeting or small talk in one short line. Answer only what was asked: no lists of what you can do, no description of your setup or configuration, no offers of further help. Do not explore, run commands or edit files unless the request needs it.";
+
 impl Profile {
     pub fn name(&self) -> &'static str {
         match self {
@@ -31,7 +34,11 @@ impl Profile {
         }
     }
 
-    pub fn system_prompt(&self) -> &'static str {
+    pub fn system_prompt(&self) -> String {
+        format!("{}\n{}", self.role_prompt(), STYLE_RULES)
+    }
+
+    fn role_prompt(&self) -> &'static str {
         match self {
             Profile::Ask => {
                 "You are DevCode in 'ask' mode. You answer questions about the codebase using read-only tools.\n\
