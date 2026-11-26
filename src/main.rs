@@ -174,6 +174,12 @@ fn main() {
                 println!("{}", line);
             }
         }
+        Ok(RunOutput::Gc(report)) => {
+            println!(
+                "Pruned {} manifest(s) and {} blob(s)",
+                report.pruned_manifests, report.pruned_blobs
+            );
+        }
         Ok(RunOutput::Prompt(result)) => print_result(&result),
         Ok(RunOutput::Repl(mut session)) => loop {
             let mut line = String::new();

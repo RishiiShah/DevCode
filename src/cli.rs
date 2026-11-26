@@ -69,6 +69,8 @@ pub enum Command {
         #[arg(long)]
         step: Option<usize>,
     },
+    /// Prune expired checkpoint manifests and unreferenced blobs
+    Gc,
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]

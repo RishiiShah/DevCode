@@ -495,3 +495,184 @@ fn test_measured_snapshot_time_1200_files() {
         t_first, t_incremental
     );
 }
+
+#[test]
+fn state_pruning_expires_old_completed_manifests_and_keeps_referenced_blobs() {
+    use devcode::manifest::blob::store_blob;
+    use devcode::manifest::record::{save_manifest, FileType, PathRecord, StepManifest};
+    use devcode::manifest::rollback::prune_state_at;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let old_only_blob = store_blob(root, b"old only content").unwrap();
+    let shared_blob = store_blob(root, b"shared content").unwrap();
+    let fresh_only_blob = store_blob(root, b"fresh only content").unwrap();
+    let orphan_blob = store_blob(root, b"orphan content").unwrap();
+    let recovery_blob = store_blob(root, b"recovery content").unwrap();
+    let incomplete_blob = store_blob(root, b"incomplete content").unwrap();
+
+    let now = 2_000_000_000u64;
+    let eight_days_ago = now - 8 * 24 * 60 * 60;
+    let one_day_ago = now - 24 * 60 * 60;
+
+    let record_with_blob = |path: &str, hash: &str| PathRecord {
+        path: PathBuf::from(path),
+        exists: true,
+        file_type: Some(FileType::File),
+        symlink_target: None,
+        mode: Some(0o644),
+        sha256: Some(hash.to_string()),
+        blob_ref: Some(hash.to_string()),
+    };
+
+    // Expired completed manifest (>7 days)
+    save_manifest(
+        root,
+        &StepManifest {
+            session_id: "old_session".into(),
+            step_id: 1,
+            timestamp: eight_days_ago,
+            pre_state: vec![
+                record_with_blob("a.txt", &old_only_blob),
+                record_with_blob("shared.txt", &shared_blob),
+            ],
+            post_state: Some(vec![record_with_blob("a.txt", &old_only_blob)]),
+        },
+    )
+    .unwrap();
+
+    // Recent completed manifest (<7 days) referencing shared_blob and fresh_only_blob
+    save_manifest(
+        root,
+        &StepManifest {
+            session_id: "fresh_session".into(),
+            step_id: 1,
+            timestamp: one_day_ago,
+            pre_state: vec![
+                record_with_blob("shared.txt", &shared_blob),
+                record_with_blob("b.txt", &fresh_only_blob),
+            ],
+            post_state: Some(vec![record_with_blob("b.txt", &fresh_only_blob)]),
+        },
+    )
+    .unwrap();
+
+    // Aged incomplete manifest (post_state: None) must be kept!
+    save_manifest(
+        root,
+        &StepManifest {
+            session_id: "unresolved_session".into(),
+            step_id: 1,
+            timestamp: eight_days_ago,
+            pre_state: vec![record_with_blob("c.txt", &incomplete_blob)],
+            post_state: None,
+        },
+    )
+    .unwrap();
+
+    // Recovery snapshot must keep its referenced blob.
+    let recovery_dir = devcode::state::recovery_dir(root).join("rec_session");
+    fs::create_dir_all(&recovery_dir).unwrap();
+    let mut rec_files = std::collections::HashMap::new();
+    rec_files.insert(
+        PathBuf::from("r.txt"),
+        devcode::manifest::FileFingerprint {
+            file_type: FileType::File,
+            size: 16,
+            mtime_ns: 1,
+            mode: 0o644,
+            sha256: Some(recovery_blob.clone()),
+            symlink_target: None,
+        },
+    );
+    fs::write(
+        recovery_dir.join("1.json"),
+        serde_json::to_vec(&devcode::manifest::GuardSetSnapshot {
+            files: rec_files,
+            total_blob_bytes: 16,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let report = prune_state_at(root, now).unwrap();
+    assert_eq!(report.pruned_manifests, 1);
+    assert_eq!(report.pruned_blobs, 2); // old_only_blob + orphan_blob
+
+    let blobs_dir = devcode::state::blobs_dir(root);
+    assert!(!blobs_dir.join(&old_only_blob).exists());
+    assert!(!blobs_dir.join(&orphan_blob).exists());
+    assert!(blobs_dir.join(&shared_blob).exists());
+    assert!(blobs_dir.join(&fresh_only_blob).exists());
+    assert!(blobs_dir.join(&recovery_blob).exists());
+    assert!(blobs_dir.join(&incomplete_blob).exists());
+    assert!(!devcode::state::manifests_dir(root)
+        .join("old_session")
+        .exists());
+    assert!(devcode::state::manifests_dir(root)
+        .join("fresh_session")
+        .join("1.json")
+        .exists());
+    assert!(devcode::state::manifests_dir(root)
+        .join("unresolved_session")
+        .join("1.json")
+        .exists());
+}
+
+#[test]
+fn session_start_prunes_aged_manifests_and_gc_cli_runs() {
+    use devcode::agent::ScriptedModel;
+    use devcode::config::Config;
+    use devcode::manifest::blob::store_blob;
+    use devcode::manifest::record::{save_manifest, FileType, PathRecord, StepManifest};
+    use devcode::{Cli, Profile, Session};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let blob = store_blob(root, b"expired").unwrap();
+    save_manifest(
+        root,
+        &StepManifest {
+            session_id: "ancient".into(),
+            step_id: 1,
+            timestamp: 1,
+            pre_state: vec![PathRecord {
+                path: PathBuf::from("old.txt"),
+                exists: true,
+                file_type: Some(FileType::File),
+                symlink_target: None,
+                mode: Some(0o644),
+                sha256: Some(blob.clone()),
+                blob_ref: Some(blob.clone()),
+            }],
+            post_state: Some(Vec::new()),
+        },
+    )
+    .unwrap();
+
+    // Starting a session prunes expired manifests and unreferenced blobs automatically.
+    let _s = Session::new(
+        root.to_path_buf(),
+        Config::default(),
+        Profile::Ask,
+        Box::new(ScriptedModel::new(vec![])),
+        devcode::tools::registry(root.to_path_buf(), false),
+    );
+    assert!(!devcode::state::manifests_dir(root).join("ancient").exists());
+    assert!(!devcode::state::blobs_dir(root).join(&blob).exists());
+
+    // `devcode gc` subcommand parses and runs cleanly.
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["devcode", "gc"]).unwrap();
+    assert!(matches!(cli.command, Some(devcode::Command::Gc)));
+    let bin = env!("CARGO_BIN_EXE_devcode");
+    let output = Command::new(bin)
+        .arg("gc")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Pruned 0 manifest(s) and 0 blob(s)"));
+}

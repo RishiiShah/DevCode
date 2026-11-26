@@ -2,9 +2,11 @@ use crate::manifest::blob::read_blob;
 use crate::manifest::record::{load_manifest, FileType, StepManifest};
 use crate::manifest::ManifestError;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Extracts a pre-command snapshot without overwriting the working tree.
 pub fn recover_snapshot(root: &Path, session: &str, step: usize) -> Result<PathBuf, ManifestError> {
@@ -403,4 +405,213 @@ pub fn rollback_latest(
     let latest_session = &sessions[0].0;
 
     rollback(root, latest_session, target_step)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GcReport {
+    pub pruned_manifests: usize,
+    pub pruned_blobs: usize,
+}
+
+/// Prunes expired completed manifests and unreferenced blobs for `root` (ARCH §4.2).
+pub fn prune_state(root: &Path) -> Result<GcReport, ManifestError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    prune_state_at(root, now)
+}
+
+/// Deterministic variant of [`prune_state`] using `now_secs` as the current Unix timestamp.
+pub fn prune_state_at(root: &Path, now_secs: u64) -> Result<GcReport, ManifestError> {
+    let mut report = GcReport::default();
+    let mut all_refs_known = true;
+    let mut referenced_blobs: HashSet<String> = HashSet::new();
+
+    let manifests_root = crate::state::manifests_dir(root);
+    if manifests_root.exists() {
+        for entry in fs::read_dir(&manifests_root).map_err(ManifestError::Io)? {
+            let entry = entry.map_err(ManifestError::Io)?;
+            let session_dir = entry.path();
+            if !session_dir.is_dir() {
+                continue;
+            }
+            prune_session_manifests(
+                &session_dir,
+                now_secs,
+                &mut report.pruned_manifests,
+                &mut referenced_blobs,
+                &mut all_refs_known,
+            )?;
+        }
+    }
+
+    let recovery_root = crate::state::recovery_dir(root);
+    if recovery_root.exists() {
+        collect_recovery_blobs(&recovery_root, &mut referenced_blobs, &mut all_refs_known);
+    }
+
+    // Never evict a potentially required backup if any manifest or recovery snapshot failed to parse.
+    if all_refs_known {
+        let blobs_root = crate::state::blobs_dir(root);
+        if blobs_root.exists() {
+            for entry in fs::read_dir(&blobs_root).map_err(ManifestError::Io)? {
+                let entry = entry.map_err(ManifestError::Io)?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !referenced_blobs.contains(name) && fs::remove_file(&path).is_ok() {
+                    report.pruned_blobs += 1;
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn manifest_timestamp(path: &Path, manifest: &StepManifest) -> u64 {
+    if manifest.timestamp > 0 {
+        return manifest.timestamp;
+    }
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn collect_manifest_blobs(manifest: &StepManifest, out: &mut HashSet<String>) {
+    for rec in &manifest.pre_state {
+        if let Some(blob) = &rec.blob_ref {
+            out.insert(blob.clone());
+        }
+        if let Some(sha) = &rec.sha256 {
+            out.insert(sha.clone());
+        }
+    }
+    if let Some(post) = &manifest.post_state {
+        for rec in post {
+            if let Some(blob) = &rec.blob_ref {
+                out.insert(blob.clone());
+            }
+            if let Some(sha) = &rec.sha256 {
+                out.insert(sha.clone());
+            }
+        }
+    }
+}
+
+fn prune_session_manifests(
+    session_dir: &Path,
+    now_secs: u64,
+    pruned_manifests: &mut usize,
+    referenced_blobs: &mut HashSet<String>,
+    all_refs_known: &mut bool,
+) -> Result<(), ManifestError> {
+    let mut completed: Vec<(usize, PathBuf, StepManifest, u64)> = Vec::new();
+    let mut total_entries = 0usize;
+
+    for entry in fs::read_dir(session_dir).map_err(ManifestError::Io)? {
+        let entry = entry.map_err(ManifestError::Io)?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        total_entries += 1;
+        let Ok(content) = fs::read_to_string(&path) else {
+            *all_refs_known = false;
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<StepManifest>(&content) else {
+            *all_refs_known = false;
+            continue;
+        };
+        if manifest.post_state.is_none() {
+            // Incomplete / unresolved recovery manifests are never expired.
+            collect_manifest_blobs(&manifest, referenced_blobs);
+            continue;
+        }
+        let ts = manifest_timestamp(&path, &manifest);
+        completed.push((manifest.step_id, path, manifest, ts));
+    }
+
+    // Keep the newest MAX_SESSION_COMPLETED_MANIFESTS completed steps that are not expired.
+    completed.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let mut kept_completed = 0usize;
+    let mut removed_in_session = 0usize;
+    for (_, path, manifest, ts) in completed {
+        let expired = now_secs.saturating_sub(ts) > crate::state::MANIFEST_RETENTION_SECS;
+        let over_cap = kept_completed >= crate::state::MAX_SESSION_COMPLETED_MANIFESTS;
+        if expired || over_cap {
+            if fs::remove_file(&path).is_ok() {
+                *pruned_manifests += 1;
+                removed_in_session += 1;
+                continue;
+            }
+            *all_refs_known = false;
+        } else {
+            kept_completed += 1;
+        }
+        collect_manifest_blobs(&manifest, referenced_blobs);
+    }
+
+    if total_entries > 0 && removed_in_session == total_entries {
+        let _ = fs::remove_dir(session_dir);
+    }
+    Ok(())
+}
+
+fn collect_recovery_blobs(
+    recovery_root: &Path,
+    referenced_blobs: &mut HashSet<String>,
+    all_refs_known: &mut bool,
+) {
+    let Ok(sessions) = fs::read_dir(recovery_root) else {
+        *all_refs_known = false;
+        return;
+    };
+    for session in sessions {
+        let Ok(session) = session else {
+            *all_refs_known = false;
+            continue;
+        };
+        let path = session.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(&path) else {
+            *all_refs_known = false;
+            continue;
+        };
+        for file in files {
+            let Ok(file) = file else {
+                *all_refs_known = false;
+                continue;
+            };
+            let fpath = file.path();
+            if fpath.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&fpath) else {
+                *all_refs_known = false;
+                continue;
+            };
+            let Ok(snap) = serde_json::from_slice::<crate::manifest::GuardSetSnapshot>(&bytes)
+            else {
+                *all_refs_known = false;
+                continue;
+            };
+            for rec in snap.files.values() {
+                if let Some(sha) = &rec.sha256 {
+                    referenced_blobs.insert(sha.clone());
+                }
+            }
+        }
+    }
 }

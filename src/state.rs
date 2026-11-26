@@ -8,6 +8,11 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+/// Completed manifests older than 7 days are eligible for pruning (ARCH §4.2).
+pub const MANIFEST_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+/// Maximum completed manifests retained per inactive session (ARCH §4.2).
+pub const MAX_SESSION_COMPLETED_MANIFESTS: usize = 20;
+
 /// Base directory for all projects: `DEVCODE_STATE_DIR`, else `$XDG_DATA_HOME/devcode`, else
 /// `~/.local/share/devcode`. Without a home directory it falls back to `<root>/.devcode`.
 fn base() -> Option<PathBuf> {
@@ -48,6 +53,18 @@ pub fn dir(root: &Path) -> PathBuf {
         .collect();
     base.join("projects")
         .join(format!("{name}-{}", &hash[..12]))
+}
+
+pub fn manifests_dir(root: &Path) -> PathBuf {
+    dir(root).join("manifests")
+}
+
+pub fn blobs_dir(root: &Path) -> PathBuf {
+    dir(root).join("blobs")
+}
+
+pub fn recovery_dir(root: &Path) -> PathBuf {
+    dir(root).join("recovery")
 }
 
 #[cfg(test)]

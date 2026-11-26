@@ -112,6 +112,7 @@ impl Session {
         model: Box<dyn agent::Model>,
         tools: agent::ToolRegistry,
     ) -> Self {
+        let _ = manifest::prune_state(&root);
         let cancel = tools.cancel_token().unwrap_or_default();
         let config_context_window = explicit_config_window(&config);
         Self {
@@ -580,6 +581,7 @@ pub enum RunOutput {
     Prompt(agent::LoopResult),
     Repl(Box<Session>),
     Auth(Vec<String>),
+    Gc(manifest::GcReport),
 }
 
 pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
@@ -599,6 +601,11 @@ pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
                 manifest::ManifestError::ManifestNotFound { .. } => DevCodeError::NoManifest,
                 other => DevCodeError::Config(other.to_string()),
             });
+    }
+    if let Some(Command::Gc) = cli.command {
+        return manifest::prune_state(&root)
+            .map(RunOutput::Gc)
+            .map_err(|e| DevCodeError::Config(e.to_string()));
     }
     let config = resolve_config(&root, &cli).map_err(|e| DevCodeError::Config(e.to_string()))?;
     let model = match config
