@@ -371,6 +371,7 @@ impl App {
                             .collect();
                         *loading = false;
                     }
+                    self.focus_current();
                 }
             }
             Ev::Models(result) => self.on_models(result),
@@ -398,6 +399,7 @@ impl App {
                     *items = list;
                     *loading = false;
                 }
+                self.focus_current();
             }
             Err(message) => {
                 self.models.clear();
@@ -1380,6 +1382,46 @@ impl App {
         }
     }
 
+    /// What the open picker's kind is set to now, read from the provider label
+    /// (`connector · model · effort LEVEL`).
+    pub fn picker_current(&self) -> Option<String> {
+        let Some(Modal::Picker { kind, .. }) = &self.modal else {
+            return None;
+        };
+        let mut parts = self.provider.split(" · ");
+        let provider = parts.next()?;
+        let model = parts.next();
+        let effort = parts.find_map(|p| p.strip_prefix("effort "));
+        match kind {
+            PickKind::Provider => Some(provider.to_string()),
+            PickKind::Model => model.map(str::to_string),
+            PickKind::Effort => Some(effort.unwrap_or("default").to_string()),
+            PickKind::Command => None,
+        }
+    }
+
+    /// Opens a picker on the current choice, as Codex and Claude Code do.
+    fn focus_current(&mut self) {
+        let Some(current) = self.picker_current() else {
+            return;
+        };
+        let at = self
+            .modal
+            .as_ref()
+            .and_then(|m| m.visible().iter().position(|v| *v == current));
+        if let (
+            Some(at),
+            Some(Modal::Picker {
+                selected, filter, ..
+            }),
+        ) = (at, &mut self.modal)
+        {
+            if filter.is_empty() {
+                *selected = at;
+            }
+        }
+    }
+
     fn open_command_palette(&mut self) {
         self.modal = Some(Modal::Picker {
             kind: PickKind::Command,
@@ -1496,7 +1538,9 @@ impl App {
                 if busy {
                     return busy_block(&mut self.items);
                 }
-                self.pick(name, arg)
+                let actions = self.pick(name, arg);
+                self.focus_current();
+                actions
             }
             "init" => {
                 if busy {
@@ -3093,5 +3137,14 @@ mod tests {
     fn git_branch_reads_this_repository() {
         // Tests run from the crate root, which is a git checkout.
         assert!(git_branch().is_some_and(|b| !b.is_empty()));
+    }
+
+    #[test]
+    fn model_list_arriving_selects_the_current_model() {
+        let mut a = App::new(Profile::Build, "nim · b/two".into(), None);
+        type_str(&mut a, "/model");
+        a.on_key(key(KeyCode::Enter));
+        a.on_event(Ev::Models(Ok(vec!["a/one".into(), "b/two".into()])));
+        assert!(matches!(a.modal, Some(Modal::Picker { selected: 1, .. })));
     }
 }

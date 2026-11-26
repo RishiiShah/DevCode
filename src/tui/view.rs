@@ -953,19 +953,149 @@ fn draw_approval(frame: &mut Frame, screen: Rect, app: &mut App) {
     );
 }
 
+/// Picker docked at the bottom like the approval panel (Codex style): title with the current
+/// value, filter line, a window of options with the current one ticked, and key hints.
+fn draw_picker(frame: &mut Frame, screen: Rect, app: &App) {
+    let Some(
+        modal @ Modal::Picker {
+            kind,
+            filter,
+            selected,
+            loading,
+            ..
+        },
+    ) = &app.modal
+    else {
+        return;
+    };
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let (title, noun) = match kind {
+        PickKind::Model => ("Select model", "models"),
+        PickKind::Provider => ("Select provider", "providers"),
+        PickKind::Effort => ("Reasoning effort", "levels"),
+        PickKind::Command => ("Commands", "commands"),
+    };
+    let current = app.picker_current();
+    let shown = modal.visible();
+    const MAX_ROWS: usize = 12;
+    let list_rows = shown.len().clamp(1, MAX_ROWS) as u16;
+    // Border, title, filter, gap, list, gap, hint.
+    let height = (list_rows + 6).min(screen.height.saturating_sub(1));
+    let area = Rect::new(
+        screen.x,
+        screen.bottom().saturating_sub(height + 1),
+        screen.width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::new().fg(Color::Cyan))
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [head, filter_row, _, list, _, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let mut title_spans = vec![Span::styled(title, Style::new().bold())];
+    if let Some(current) = &current {
+        title_spans.push(Span::styled(format!("   current: {current}"), dim));
+    }
+    frame.render_widget(Paragraph::new(Line::from(title_spans)), head);
+    let filter_line = if filter.is_empty() {
+        Line::from(vec![
+            Span::styled("⌕ ", Style::new().fg(Color::Cyan)),
+            Span::styled(format!("Type to filter {noun}"), dim),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("⌕ ", Style::new().fg(Color::Cyan)),
+            Span::raw(filter.clone()),
+            Span::styled("▏", Style::new().fg(Color::Cyan)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(filter_line), filter_row);
+    let rows: Vec<Line> = if *loading {
+        vec![Line::styled(
+            format!("Loading {noun} from the provider…"),
+            dim,
+        )]
+    } else if shown.is_empty() {
+        vec![Line::styled(
+            match kind {
+                PickKind::Model if !filter.trim().is_empty() => {
+                    format!("No match. Enter uses '{}' as the model id.", filter.trim())
+                }
+                _ => format!("No {noun} match."),
+            },
+            Style::new().fg(Color::Yellow),
+        )]
+    } else {
+        let height = list.height as usize;
+        let start = selected
+            .saturating_sub(height / 2)
+            .min(shown.len().saturating_sub(height));
+        shown
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(height)
+            .map(|(i, item)| {
+                let chosen = i == *selected;
+                let style = if chosen {
+                    Style::new().fg(Color::Cyan).bold()
+                } else {
+                    Style::new()
+                };
+                let mut spans = vec![
+                    Span::styled(if chosen { "› " } else { "  " }, style),
+                    Span::styled(item.to_string(), style),
+                ];
+                if current.as_deref() == Some(*item) {
+                    spans.push(Span::styled("  ✓ current", Style::new().fg(Color::Green)));
+                }
+                if kind == &PickKind::Command {
+                    spans.push(Span::styled(
+                        format!("  {}", super::app::command_about(item)),
+                        dim,
+                    ));
+                }
+                Line::from(spans)
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(rows), list);
+    let position = if shown.is_empty() {
+        String::new()
+    } else {
+        format!("{}/{} · ", selected + 1, shown.len())
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!("{position}↑↓ move · Enter select · Esc cancel"),
+            dim,
+        )),
+        hint,
+    );
+}
+
 fn draw_modal(frame: &mut Frame, screen: Rect, app: &mut App) {
     let Some(modal) = &app.modal else { return };
     if matches!(modal, Modal::Approve { .. } | Modal::Confirm { .. }) {
         draw_approval(frame, screen, app);
         return;
     }
-    let mut area = centered(screen, 90, 75);
-    if let Modal::Picker { items, .. } = modal {
-        // Fit the list: header rows plus items, never taller than the default size.
-        let rows = modal.visible().len().min(items.len()).max(1) as u16;
-        area.height = (rows + 6).clamp(8, area.height.max(8)).min(screen.height);
-        area.y = screen.y + (screen.height.saturating_sub(area.height)) / 2;
+    if matches!(modal, Modal::Picker { .. }) {
+        draw_picker(frame, screen, app);
+        return;
     }
+    let area = centered(screen, 90, 75);
     frame.render_widget(Clear, area);
     let (title, body, hint, scroll): (&str, Vec<Line>, &str, u16) = match modal {
         Modal::Approve { .. } | Modal::Confirm { .. } => return,
@@ -1007,66 +1137,7 @@ fn draw_modal(frame: &mut Frame, screen: Rect, app: &mut App) {
                 0,
             )
         }
-        Modal::Picker {
-            kind,
-            filter,
-            selected,
-            loading,
-            ..
-        } => {
-            let (title, noun) = match kind {
-                PickKind::Model => (" Select model ", "models"),
-                PickKind::Provider => (" Select provider ", "providers"),
-                PickKind::Effort => (" Reasoning effort ", "levels"),
-                PickKind::Command => (" Command palette ", "commands"),
-            };
-            let shown = modal.visible();
-            let mut lines = vec![Line::from(vec![
-                Span::styled("filter: ", Style::new().bold()),
-                Span::raw(filter.clone()),
-                Span::styled("▏", Style::new().fg(Color::Cyan)),
-            ])];
-            lines.push(Line::raw(""));
-            if *loading {
-                lines.push(Line::styled(
-                    "loading models from the provider…",
-                    Style::new().add_modifier(Modifier::DIM),
-                ));
-            } else if shown.is_empty() {
-                let note = match kind {
-                    PickKind::Model if !filter.trim().is_empty() => {
-                        format!("no match; Enter uses '{}' as the model id", filter.trim())
-                    }
-                    PickKind::Command => "no commands match".to_string(),
-                    _ => format!("no {noun} match"),
-                };
-                lines.push(Line::styled(note, Style::new().fg(Color::Yellow)));
-            } else {
-                // Window of rows that keeps the selection visible.
-                let rows = (area.height as usize).saturating_sub(6).max(1);
-                let start = selected
-                    .saturating_sub(rows / 2)
-                    .min(shown.len().saturating_sub(rows));
-                for (i, item) in shown.iter().enumerate().skip(start).take(rows) {
-                    let style = if i == *selected {
-                        Style::new().bold().fg(Color::Black).bg(Color::Cyan)
-                    } else {
-                        Style::new()
-                    };
-                    lines.push(Line::styled(format!(" {item} "), style));
-                }
-                lines.push(Line::styled(
-                    format!("{} of {} {noun}", selected + 1, shown.len()),
-                    Style::new().add_modifier(Modifier::DIM),
-                ));
-            }
-            (
-                title,
-                lines,
-                " type: filter   ↑↓: move   Enter: select   Esc: cancel ",
-                0,
-            )
-        }
+        Modal::Picker { .. } => return,
         Modal::Help => (
             " Help ",
             help_text()
@@ -1079,8 +1150,10 @@ fn draw_modal(frame: &mut Frame, screen: Rect, app: &mut App) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::Cyan))
-        .title(title)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 0))
+        .title(Line::styled(title, Style::new().bold().fg(Color::Cyan)))
         .title_bottom(Line::styled(hint, Style::new().add_modifier(Modifier::DIM)));
     let paragraph = Paragraph::new(body).block(block).wrap(Wrap { trim: false });
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
@@ -1325,8 +1398,25 @@ mod tests {
         let screen = render(&mut app, 80, 24);
         assert!(screen.contains("Select model"));
         assert!(screen.contains("model-3"));
-        assert!(screen.contains(&format!("3 of {total} models")));
+        assert!(screen.contains(&format!("3/{total} · ↑↓ move")), "{screen}");
         assert!(!screen.contains("model-4 "));
+    }
+
+    #[test]
+    fn model_picker_opens_on_the_current_model_and_ticks_it() {
+        let mut app = App::new(Profile::Build, "nim · b/two · effort high".into(), None);
+        app.modal = Some(Modal::Picker {
+            kind: PickKind::Model,
+            items: vec!["a/one".into(), "b/two".into(), "c/three".into()],
+            filter: String::new(),
+            selected: 0,
+            loading: false,
+        });
+        assert_eq!(app.picker_current().as_deref(), Some("b/two"));
+        let screen = render(&mut app, 80, 24);
+        assert!(screen.contains("current: b/two"), "{screen}");
+        assert!(screen.contains("b/two  ✓ current"), "{screen}");
+        assert!(screen.contains("⌕ Type to filter models"), "{screen}");
     }
 
     #[test]
