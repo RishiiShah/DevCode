@@ -249,6 +249,11 @@ impl Anthropic {
                         blocks.push(block);
                         index += 1;
                     }
+                    // A message the user sent mid-run follows the results in the same turn.
+                    while index < messages.len() && messages[index].role == Role::User {
+                        blocks.push(json!({"type": "text", "text": messages[index].content}));
+                        index += 1;
+                    }
                     out.push(json!({"role": "user", "content": blocks}));
                     continue;
                 }

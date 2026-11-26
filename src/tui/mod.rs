@@ -3,6 +3,7 @@
 //! The UI thread owns the terminal. A worker thread owns the `Session`. Approval questions
 //! flow worker -> UI as text, answers flow UI -> worker as lines (see `worker`).
 pub mod app;
+mod clipboard;
 mod fuzzy;
 pub mod markdown;
 pub mod view;
@@ -13,7 +14,7 @@ use crate::{Cli, DevCodeError};
 use app::{Action, App};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyEventKind, MouseEventKind,
+    Event, KeyEventKind,
 };
 use crossterm::execute;
 use std::sync::mpsc;
@@ -38,13 +39,19 @@ pub fn run(cli: Cli) -> Result<(), DevCodeError> {
         cli.yes,
     );
     let session = crate::open_session(&cli, prompt)?;
-    let cancel = session.cancel.clone();
-    let prefetch = session.has_provider();
-    let mut app = App::new(
-        session.profile,
-        session.provider_label(),
-        session.startup_note(),
-    );
+    let shared = Shared {
+        cancel: session.cancel.clone(),
+        steer: session.steer.clone(),
+        processes: session.process_control(),
+        events: ev_tx.clone(),
+    };
+    let startup_note = session.startup_note();
+    let prefetch = session.has_provider() && startup_note.is_none();
+    let mut app = App::new(session.profile, session.provider_label(), startup_note);
+    app.context_window = session.context_window();
+    if let Some(items) = session.statusline() {
+        app.statusline = items;
+    }
     let _worker = worker::spawn(session, cli.clone(), cmd_rx, ev_tx);
     // Same as peers: load the model catalog as soon as a provider is configured.
     if prefetch {
@@ -53,15 +60,7 @@ pub fn run(cli: Cli) -> Result<(), DevCodeError> {
 
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
-    let result = event_loop(
-        &mut terminal,
-        &mut app,
-        &cmd_tx,
-        &ans_tx,
-        &ev_rx,
-        &cancel,
-        &cli,
-    );
+    let result = event_loop(&mut terminal, &mut app, &cmd_tx, &ans_tx, &ev_rx, &shared);
     let _ = execute!(
         std::io::stdout(),
         DisableBracketedPaste,
@@ -77,15 +76,33 @@ fn event_loop(
     cmds: &mpsc::Sender<Cmd>,
     answers: &mpsc::Sender<String>,
     events: &mpsc::Receiver<Ev>,
-    cancel: &crate::agent::CancelToken,
-    cli: &Cli,
+    shared: &Shared,
 ) -> std::io::Result<()> {
+    let Shared { cancel, steer, .. } = shared;
     loop {
         while let Ok(ev) = events.try_recv() {
             app.on_event(ev);
         }
+        if let Some(cmd) = app.next_queued() {
+            // The run ended before reading them; they go out as the next prompt instead.
+            if let Ok(mut inbox) = steer.lock() {
+                inbox.clear();
+            }
+            cancel.reset();
+            let _ = cmds.send(cmd);
+        }
         app.tick = app.tick.wrapping_add(1);
+        app.on_tick();
         terminal.draw(|f| view::draw(f, app))?;
+        if let Some(text) = app.copied.take() {
+            let chars = text.chars().count();
+            let notice = if clipboard::copy(&text) {
+                format!("copied {chars} chars")
+            } else {
+                format!("sent {chars} chars to the terminal clipboard")
+            };
+            app.flash = Some((notice, std::time::Instant::now()));
+        }
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
@@ -95,12 +112,8 @@ fn event_loop(
                 app.on_paste(&text);
                 Vec::new()
             }
-            Event::Mouse(mouse) if app.modal.is_none() => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => app.on_mouse_scroll(true),
-                    MouseEventKind::ScrollDown => app.on_mouse_scroll(false),
-                    _ => {}
-                }
+            Event::Mouse(mouse) => {
+                app.on_mouse(mouse);
                 Vec::new()
             }
             _ => Vec::new(),
@@ -116,7 +129,21 @@ fn event_loop(
                 Action::Answer(line) => {
                     let _ = answers.send(line);
                 }
-                Action::Init(provider) => init(app, cmds, &provider, cli),
+                Action::Init(provider) => init(app, cmds, &provider),
+                Action::Steer(text) => {
+                    if let Ok(mut inbox) = steer.lock() {
+                        inbox.push(text);
+                    }
+                }
+                Action::Unsteer(text) => {
+                    if let Ok(mut inbox) = steer.lock() {
+                        if let Some(at) = inbox.iter().rposition(|t| *t == text) {
+                            inbox.remove(at);
+                        }
+                    }
+                }
+                Action::Processes => shared.on_processes(None),
+                Action::StopProcess(id) => shared.on_processes(Some(id)),
                 Action::Cancel => cancel.cancel(),
                 Action::Quit => {
                     cancel.cancel();
@@ -127,8 +154,45 @@ fn event_loop(
     }
 }
 
+/// What the UI thread shares with the worker's session.
+struct Shared {
+    cancel: crate::agent::CancelToken,
+    steer: crate::agent::SteerInbox,
+    processes: Option<crate::tools::managed::ProcessControl>,
+    events: mpsc::Sender<Ev>,
+}
+
+impl Shared {
+    /// /ps and /stop run beside the agent: a helper thread waits for the tool context (free
+    /// between tool calls) and reports back, so the UI never blocks.
+    fn on_processes(&self, stop: Option<String>) {
+        let Some(control) = self.processes.clone() else {
+            let _ = self
+                .events
+                .send(Ev::Info(vec!["no background processes".into()]));
+            return;
+        };
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let lines = match stop {
+                Some(id) => vec![control.stop(&id).unwrap_or_else(|e| format!("✗ {e}"))],
+                None => {
+                    let lines = control.list();
+                    if lines.is_empty() {
+                        vec!["no background processes".into()]
+                    } else {
+                        lines
+                    }
+                }
+            };
+            let _ = events.send(Ev::Info(lines));
+            let _ = events.send(Ev::Processes(control.running()));
+        });
+    }
+}
+
 /// Writes `.devcode.json` (never overwrites) and asks the worker to reload it.
-fn init(app: &mut App, cmds: &mpsc::Sender<Cmd>, provider: &str, _cli: &Cli) {
+fn init(app: &mut App, cmds: &mpsc::Sender<Cmd>, provider: &str) {
     use app::Item;
     let root = match std::env::current_dir() {
         Ok(r) => r,

@@ -141,6 +141,8 @@ fn tool_result_round_trip_in_next_request() {
     follow_up
         .messages
         .push(Message::tool("file contents", "tu_1"));
+    // A message the user sent mid-run joins the tool results' user turn.
+    follow_up.messages.push(Message::user("use port 3000"));
     model.complete(&follow_up).unwrap();
     let captured = requests.lock().unwrap();
     let second_body = String::from_utf8_lossy(captured.last().unwrap());
@@ -155,6 +157,8 @@ fn tool_result_round_trip_in_next_request() {
     assert_eq!(messages[1]["content"][0]["type"], "tool_result");
     assert_eq!(messages[1]["content"][0]["tool_use_id"], "tu_1");
     assert_eq!(messages[1]["content"][0]["content"], "file contents");
+    assert_eq!(messages[1]["content"][1]["type"], "text");
+    assert_eq!(messages[1]["content"][1]["text"], "use port 3000");
 }
 
 #[test]

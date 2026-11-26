@@ -688,6 +688,7 @@ dependencies = [
  "sha2",
  "similar",
  "tempfile",
+ "unicode-width",
  "ureq",
 ]
 

@@ -10,7 +10,7 @@ pub mod tool;
 
 pub use loop_runner::{
     run_agent_loop, run_agent_with_config, ExitReason, LoopLimits, LoopResult, ProgressEvent,
-    ProgressSink,
+    ProgressSink, SteerInbox,
 };
 pub use model::{
     CancelToken, Message, Model, ModelError, Request, Response, Role, StreamChunk, ToolCall,

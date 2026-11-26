@@ -72,20 +72,35 @@ fn startup_failure_reports_exit_and_never_claims_ready() {
 }
 
 #[test]
-fn readiness_timeout_stops_process_and_fails() {
+fn slow_start_keeps_running_in_background_and_can_be_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let tools = registry(dir.path(), "y\n");
     let port = free_port();
-    let err = start(&tools, "sleep 30", port, 1).unwrap_err();
-    assert!(err.contains("not ready within 1s"), "{err}");
-    assert!(!port_open(port));
-    let status = call(
-        &tools,
-        "process_status",
-        serde_json::json!({"id": "proc-1"}),
-    )
-    .unwrap();
-    assert!(status.contains("stopped"), "{status}");
+    let ok = start(&tools, "sleep 30", port, 1).unwrap();
+    assert!(ok.contains("still starting"), "{ok}");
+    assert!(ok.contains("keeps running"), "{ok}");
+    let listed = call(&tools, "list_processes", serde_json::json!({})).unwrap();
+    assert!(listed.contains("proc-1  running"), "{listed}");
+    let stopped = call(&tools, "stop_process", serde_json::json!({"id": "proc-1"})).unwrap();
+    assert!(stopped.contains("stopped proc-1"), "{stopped}");
+    let listed = call(&tools, "list_processes", serde_json::json!({})).unwrap();
+    assert!(listed.contains("proc-1  stopped"), "{listed}");
+}
+
+#[test]
+fn ready_on_ipv6_loopback_and_port_the_server_chose() {
+    // The server ignores the requested port, binds ::1 only, and prints its URL (like Vite).
+    let dir = tempfile::tempdir().unwrap();
+    let tools = registry(dir.path(), "y\n");
+    let actual = free_port();
+    let command = format!(
+        "python3 -c \"import http.server,socket,sys\nclass S(http.server.HTTPServer): address_family = socket.AF_INET6\ns = S(('::1', {actual}), http.server.SimpleHTTPRequestHandler)\nprint('Local: http://localhost:{actual}/', flush=True)\ns.serve_forever()\""
+    );
+    let ok = start(&tools, &command, free_port(), 10).unwrap();
+    assert!(ok.contains(&format!("http://localhost:{actual}")), "{ok}");
+    assert!(ok.contains("is ready"), "{ok}");
+    assert!(ok.contains("the server chose"), "{ok}");
+    call(&tools, "stop_process", serde_json::json!({"id": "proc-1"})).unwrap();
 }
 
 #[test]

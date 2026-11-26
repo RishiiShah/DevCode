@@ -374,6 +374,11 @@ impl CodeAssist {
                         }));
                         i += 1;
                     }
+                    // A message the user sent mid-run follows the results in the same turn.
+                    while i < req.messages.len() && req.messages[i].role == Role::User {
+                        parts.push(json!({"text": req.messages[i].content}));
+                        i += 1;
+                    }
                     contents.push(json!({"role": "user", "parts": parts}));
                     continue;
                 }

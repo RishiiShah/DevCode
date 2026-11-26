@@ -13,6 +13,7 @@ globset = "0.4"
 ignore = "0.4"
 libc = "0.2"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+unicode-width = "0.2"
 regex = "1.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

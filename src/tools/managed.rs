@@ -1,5 +1,6 @@
 //! Managed long-running processes (development servers).
-//! start: approval, pre-start snapshot, own process group, readiness probe.
+//! start: approval, pre-start snapshot, own process group, readiness probe. Returns once the
+//! server answers or the wait ends; a slow server keeps running in the background.
 //! status: live state, exit status, recent log output.
 //! stop: kill the process group, confirm it is gone, reconcile file changes.
 //! Drop (DevCode exit): stops and reconciles every process still running.
@@ -14,7 +15,7 @@ use crate::tools::mutate::MutationContext;
 use serde::Deserialize;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -22,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_READY_SECS: u64 = 30;
+const DEFAULT_READY_SECS: u64 = 20;
 const MAX_READY_SECS: u64 = 120;
 const GROUP_EXIT_WAIT: Duration = Duration::from_secs(2);
 const LOG_TAIL_BYTES: u64 = 4096;
@@ -60,7 +61,36 @@ impl Drop for ManagedProcesses {
     }
 }
 
+impl ManagedProcesses {
+    /// One line per managed process: id, state, address, command.
+    pub(crate) fn list(&mut self) -> Vec<String> {
+        self.items
+            .iter_mut()
+            .map(|m| {
+                let state = if m.running() {
+                    format!("running, http://localhost:{}", m.port)
+                } else {
+                    "stopped".to_string()
+                };
+                format!("{}  {state}  {}", m.id, m.command)
+            })
+            .collect()
+    }
+
+    /// Processes still running (not stopped and not exited on their own).
+    pub(crate) fn running_count(&mut self) -> usize {
+        self.items
+            .iter_mut()
+            .filter_map(|m| m.running().then_some(()))
+            .count()
+    }
+}
+
 impl Managed {
+    fn running(&mut self) -> bool {
+        self.closed.is_none() && matches!(self.child.try_wait(), Ok(None))
+    }
+
     fn group_alive(&self) -> bool {
         // SAFETY: pgid is the positive pid of a child spawned with process_group(0).
         unsafe { libc::killpg(self.pgid, 0) == 0 }
@@ -142,9 +172,58 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// True when a local listener accepts connections on IPv4 or IPv6 loopback. `localhost` often
+/// resolves to `::1` only (Vite on macOS), so probing 127.0.0.1 alone misses ready servers.
 fn port_open(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+    [
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+    ]
+    .iter()
+    .any(|addr| TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok())
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // CSI sequence: ESC [ parameters final-letter.
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Port of the last local URL the server printed. Dev servers move to the next free port when
+/// the requested one is busy (Vite: 5173 -> 5174), so the log is the source of truth.
+fn logged_port(log: &str) -> Option<u16> {
+    let text = strip_ansi(log);
+    let mut found = None;
+    let mut best = 0;
+    for host in ["localhost:", "127.0.0.1:", "[::1]:", "0.0.0.0:"] {
+        for (at, _) in text.match_indices(host) {
+            let digits: String = text[at + host.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if let Ok(port) = digits.parse::<u16>() {
+                if port > 0 && at >= best {
+                    best = at;
+                    found = Some(port);
+                }
+            }
+        }
+    }
+    found
 }
 
 fn log_tail(path: &Path) -> String {
@@ -182,6 +261,7 @@ enum Op {
     Start,
     Status,
     Stop,
+    List,
 }
 
 struct ManagedTool {
@@ -190,7 +270,7 @@ struct ManagedTool {
 }
 
 pub fn register(tools: &mut ToolRegistry, context: Arc<Mutex<MutationContext>>) {
-    for op in [Op::Start, Op::Status, Op::Stop] {
+    for op in [Op::Start, Op::Status, Op::Stop, Op::List] {
         tools.register(ManagedTool {
             op,
             context: Arc::clone(&context),
@@ -204,13 +284,15 @@ impl Tool for ManagedTool {
             Op::Start => "start_process",
             Op::Status => "process_status",
             Op::Stop => "stop_process",
+            Op::List => "list_processes",
         }
     }
     fn description(&self) -> &str {
         match self.op {
-            Op::Start => "Start a long-running server with approval; returns once 127.0.0.1:port accepts connections, or stops it and fails",
+            Op::Start => "Start a long-running server (dev server, watcher) in the background with approval. Returns once localhost:port answers or the wait ends; a slow server keeps running. Never run servers with run_command.",
             Op::Status => "Report a managed process: running or exit status, port state, recent output",
             Op::Stop => "Stop a managed process group and report workspace changes it made",
+            Op::List => "List managed processes: id, state, address, command",
         }
     }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -222,6 +304,7 @@ impl Tool for ManagedTool {
                 "required":["command","port"]}),
             Op::Status | Op::Stop => serde_json::json!({"type":"object","properties":{
                 "id":{"type":"string"}},"required":["id"]}),
+            Op::List => serde_json::json!({"type":"object","properties":{}}),
         }
     }
     fn execute(&self, arguments: &str) -> Result<String, String> {
@@ -233,6 +316,7 @@ impl Tool for ManagedTool {
             prompt,
             log,
             processes,
+            cancel,
             ..
         } = &mut *ctx;
         match self.op {
@@ -240,7 +324,12 @@ impl Tool for ManagedTool {
                 *step += 1;
                 let args: StartArgs = serde_json::from_str(arguments)
                     .map_err(|e| format!("invalid arguments: {e}"))?;
-                start(processes, root, session.as_str(), *step, args, prompt, log)
+                let started = Started {
+                    session: session.as_str(),
+                    step: *step,
+                    cancel,
+                };
+                start(processes, root, started, args, prompt, log)
             }
             Op::Status => {
                 let args: IdArgs = serde_json::from_str(arguments)
@@ -252,15 +341,28 @@ impl Tool for ManagedTool {
                     .map_err(|e| format!("invalid arguments: {e}"))?;
                 stop(processes, &args.id, log)
             }
+            Op::List => {
+                let lines = processes.list();
+                Ok(if lines.is_empty() {
+                    "no managed processes".into()
+                } else {
+                    lines.join("\n")
+                })
+            }
         }
     }
+}
+
+struct Started<'a> {
+    session: &'a str,
+    step: usize,
+    cancel: &'a crate::agent::CancelToken,
 }
 
 fn start(
     processes: &mut ManagedProcesses,
     root: &Path,
-    session: &str,
-    step: usize,
+    started: Started<'_>,
     args: StartArgs,
     prompt: &mut crate::approval::ApprovalPrompt<
         Box<dyn std::io::BufRead + Send>,
@@ -339,8 +441,8 @@ fn start(
         log_path: log_path.clone(),
         before_path,
         before,
-        session: session.to_string(),
-        step,
+        session: started.session.to_string(),
+        step: started.step,
         closed: None,
         changed: None,
     };
@@ -348,28 +450,40 @@ fn start(
     let deadline = Instant::now() + Duration::from_secs(ready_secs);
     let outcome = loop {
         if matches!(m.child.try_wait(), Ok(Some(_))) {
-            break Err(format!(
-                "{id} exited before 127.0.0.1:{} was ready",
-                args.port
-            ));
+            break Err(format!("{id} exited before it was ready"));
         }
-        if port_open(args.port) {
-            break Ok(());
+        let logged = logged_port(&log_tail(&log_path)).filter(|&p| p != m.port);
+        if let Some(port) = logged.filter(|&p| port_open(p)) {
+            m.port = port;
+            break Ok(true);
         }
-        if Instant::now() >= deadline {
-            break Err(format!(
-                "127.0.0.1:{} not ready within {ready_secs}s",
-                args.port
-            ));
+        if port_open(m.port) {
+            break Ok(true);
+        }
+        if Instant::now() >= deadline || started.cancel.is_cancelled() {
+            break Ok(false);
         }
         thread::sleep(Duration::from_millis(100));
     };
-    if let Ok(()) = outcome {
-        let msg = format!(
-            "started {id}: pid {pgid}, 127.0.0.1:{} ready, log {}",
-            args.port,
-            log_path.display()
-        );
+    if let Ok(ready) = outcome {
+        let moved = if m.port == args.port {
+            String::new()
+        } else {
+            format!(" (asked for {}; the server chose {})", args.port, m.port)
+        };
+        let msg = if ready {
+            format!(
+                "started {id}: http://localhost:{}{moved} is ready; pid {pgid}; log {}",
+                m.port,
+                log_path.display()
+            )
+        } else {
+            format!(
+                "started {id}: still starting, localhost:{} not answering yet; it keeps running in the background. Check with process_status, stop with stop_process.\nlog:\n{}",
+                m.port,
+                log_tail(&log_path)
+            )
+        };
         processes.items.push(m);
         return Ok(msg);
     }
@@ -413,7 +527,7 @@ fn status(processes: &mut ManagedProcesses, id: &str, log: &mut ToolLog) -> Resu
         None => "changes pending reconcile".to_string(),
     };
     Ok(format!(
-        "{}: {state}; 127.0.0.1:{} {ready}; {changes}; command: {}\nlog:\n{}",
+        "{}: {state}; localhost:{} {ready}; {changes}; command: {}\nlog:\n{}",
         m.id,
         m.port,
         m.command,
@@ -421,7 +535,38 @@ fn status(processes: &mut ManagedProcesses, id: &str, log: &mut ToolLog) -> Resu
     ))
 }
 
-fn stop(processes: &mut ManagedProcesses, id: &str, log: &mut ToolLog) -> Result<String, String> {
+/// Lists and stops managed processes from the UI thread while a run works. Each call waits for
+/// the tool context, so it lands between tool calls; run it off the UI thread.
+#[derive(Clone)]
+pub struct ProcessControl(pub(crate) Arc<Mutex<MutationContext>>);
+
+impl ProcessControl {
+    pub fn list(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|mut ctx| ctx.processes.list())
+            .unwrap_or_default()
+    }
+
+    pub fn running(&self) -> usize {
+        self.0
+            .lock()
+            .map(|mut ctx| ctx.processes.running_count())
+            .unwrap_or_default()
+    }
+
+    pub fn stop(&self, id: &str) -> Result<String, String> {
+        let mut guard = self.0.lock().map_err(|e| e.to_string())?;
+        let ctx = &mut *guard;
+        stop(&mut ctx.processes, id, &mut ctx.log)
+    }
+}
+
+pub(crate) fn stop(
+    processes: &mut ManagedProcesses,
+    id: &str,
+    log: &mut ToolLog,
+) -> Result<String, String> {
     let m = find(processes, id)?;
     m.finalize(log)?;
     Ok(format!(
@@ -430,4 +575,20 @@ fn stop(processes: &mut ManagedProcesses, id: &str, log: &mut ToolLog) -> Result
         m.exit_label(),
         changed_label(m.changed.as_deref().unwrap_or(&[]))
     ))
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::logged_port;
+
+    #[test]
+    fn logged_port_reads_last_local_url_through_ansi_codes() {
+        let vite = "  VITE v8 ready\n  \x1b[32m➜\x1b[39m  Local:   \x1b[36mhttp://localhost:\x1b[1m5174\x1b[22m/\x1b[39m\n";
+        assert_eq!(logged_port(vite), Some(5174));
+        assert_eq!(
+            logged_port("Port 3000 in use\nListening on http://127.0.0.1:3001"),
+            Some(3001)
+        );
+        assert_eq!(logged_port("compiling..."), None);
+    }
 }

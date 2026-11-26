@@ -22,6 +22,8 @@ pub struct MutationContext {
     scope: ScopeContract,
     pub(crate) approval_wait: Arc<Mutex<Duration>>,
     pub(crate) cancel: CancelToken,
+    /// Unified diff of the last applied edit, for display only; the model sees "Updated …".
+    pub(crate) last_diff: Option<String>,
 }
 
 impl MutationContext {
@@ -47,6 +49,7 @@ impl MutationContext {
             },
             log: ToolLog::new(),
             processes: Default::default(),
+            last_diff: None,
             scope: ScopeContract::new(),
             approval_wait,
             cancel: CancelToken::new(),
@@ -161,6 +164,7 @@ impl Tool for MutationTool {
             prompt,
             log,
             scope,
+            last_diff,
             ..
         } = &mut *ctx;
         *step += 1;
@@ -192,11 +196,15 @@ impl Tool for MutationTool {
                 }
             }
             kind => {
-                let (path, content) = match kind {
+                let (path, old, content) = match kind {
                     Kind::Write => {
                         let args: WriteArgs = serde_json::from_str(arguments)
                             .map_err(|e| format!("invalid arguments: {e}"))?;
-                        (args.path, args.content)
+                        let old = check_write_path(root, Path::new(&args.path))
+                            .ok()
+                            .and_then(|full| std::fs::read_to_string(full).ok())
+                            .unwrap_or_default();
+                        (args.path, old, args.content)
                     }
                     Kind::Edit => {
                         let args: EditArgs = serde_json::from_str(arguments)
@@ -208,10 +216,8 @@ impl Tool for MutationTool {
                         {
                             return Err("old_string must match exactly once".into());
                         }
-                        (
-                            args.path,
-                            old.replacen(&args.old_string, &args.new_string, 1),
-                        )
+                        let new = old.replacen(&args.old_string, &args.new_string, 1);
+                        (args.path, old, new)
                     }
                     Kind::Command => return Err("invalid tool".into()),
                 };
@@ -228,6 +234,7 @@ impl Tool for MutationTool {
                 )
                 .map_err(|e| e.to_string())?;
                 if approved {
+                    *last_diff = Some(crate::approval::diff::format_diff(&old, &content, &path));
                     Ok(format!("Updated {path}"))
                 } else {
                     Err("edit rejected".into())

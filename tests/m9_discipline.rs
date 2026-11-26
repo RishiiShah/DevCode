@@ -403,3 +403,35 @@ fn test_end_of_task_summary_line_matches_scripted_run() {
         "steps: 2, tokens in: 300, tokens out: 80, files edited: 0, tests changed: 0, files changed by commands: 0, outside scope: 0, dependencies added: 0"
     );
 }
+
+#[test]
+fn compaction_pins_the_current_request_not_the_first_question() {
+    let config = Config::default();
+    let log = ToolLog::new();
+    let ctx = CompactionContext {
+        context_window: 1000,
+        active_manifest: None,
+        current_diff: "",
+        config: &config,
+        tool_log: &log,
+    };
+    let call = ToolCall {
+        id: "r".into(),
+        name: "read_file".into(),
+        arguments: "{}".into(),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message::user("what is this repo?"),
+        Message::assistant("A calculator.", vec![]),
+        Message::user("all i see is a black screen for frontend"),
+        Message::assistant("", vec![call]),
+        Message::tool("<!DOCTYPE html>", "r"),
+    ];
+    let compacted = compact_messages(&messages, &ctx);
+    assert_eq!(
+        compacted[0].content,
+        "all i see is a black screen for frontend"
+    );
+    assert!(compacted[1].content.contains("- what is this repo?"));
+}

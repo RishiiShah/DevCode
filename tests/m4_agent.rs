@@ -170,6 +170,8 @@ fn test_step_limit_ends_run_with_matching_reason() {
         progress: None,
         stream: true,
         cancel: None,
+        history: Vec::new(),
+        steer: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -208,6 +210,8 @@ fn test_wall_time_limit_ends_run_with_matching_reason() {
         progress: None,
         stream: true,
         cancel: None,
+        history: Vec::new(),
+        steer: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -235,6 +239,8 @@ fn test_consecutive_format_errors_limit_ends_run() {
         progress: None,
         stream: true,
         cancel: None,
+        history: Vec::new(),
+        steer: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();

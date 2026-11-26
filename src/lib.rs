@@ -58,6 +58,37 @@ pub struct Session {
     pub trace: bool,
     pub progress: Option<agent::ProgressSink>,
     pub cancel: agent::CancelToken,
+    /// Conversation so far, carried into the next prompt.
+    history: Vec<agent::Message>,
+    /// Messages typed during a run; the loop reads them at its next step.
+    pub steer: agent::SteerInbox,
+}
+
+/// A turn cut short (cancel, step limit) can end on tool calls without results, which providers
+/// reject on the next request. Answer each one so the conversation stays valid.
+fn close_dangling_tool_calls(messages: &mut Vec<agent::Message>) {
+    let Some(last_call) = messages
+        .iter()
+        .rposition(|m| m.role == agent::Role::Assistant && !m.tool_calls.is_empty())
+    else {
+        return;
+    };
+    let answered: std::collections::HashSet<String> = messages[last_call + 1..]
+        .iter()
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+    let missing: Vec<String> = messages[last_call]
+        .tool_calls
+        .iter()
+        .map(|call| call.id.clone())
+        .filter(|id| !answered.contains(id))
+        .collect();
+    for id in missing {
+        messages.push(agent::Message::tool(
+            "Error: not run (the turn stopped)",
+            id,
+        ));
+    }
 }
 impl Session {
     pub fn new(
@@ -77,18 +108,23 @@ impl Session {
             trace: false,
             progress: None,
             cancel,
+            history: Vec::new(),
+            steer: Default::default(),
         }
     }
-    pub fn prompt(&self, prompt: &str) -> Result<agent::LoopResult, DevCodeError> {
+    /// Runs one user turn on top of the conversation so far and records the turn in it.
+    pub fn prompt(&mut self, prompt: &str) -> Result<agent::LoopResult, DevCodeError> {
         let limits = agent::LoopLimits {
+            history: self.history.clone(),
             context_window: self.config.provider.as_ref().map(|p| p.context_window),
             trace: self.trace,
             progress: self.progress.clone(),
             stream: stream_enabled(std::env::var("DEVCODE_STREAM").ok().as_deref()),
             cancel: Some(self.cancel.clone()),
+            steer: Some(self.steer.clone()),
             ..Default::default()
         };
-        agent::run_agent_with_config(
+        let result = agent::run_agent_with_config(
             self.profile,
             self.model.as_ref(),
             &self.tools,
@@ -97,7 +133,26 @@ impl Session {
             &self.root,
             &self.config,
         )
-        .map_err(|e| DevCodeError::Config(e.to_string()))
+        .map_err(|e| DevCodeError::Config(e.to_string()));
+        match &result {
+            Ok(run) => self.history = run.messages.clone(),
+            Err(e) => {
+                // The run's own messages are lost with the error; keep the request and the
+                // failure so the next turn ("continue") still knows what was asked.
+                self.history.push(agent::Message::user(prompt));
+                self.history.push(agent::Message::assistant(
+                    format!("(This turn stopped early: {e}. Changes made before the stop are still on disk.)"),
+                    Vec::new(),
+                ));
+            }
+        }
+        close_dangling_tool_calls(&mut self.history);
+        result
+    }
+
+    /// Forgets the conversation (`/clear`).
+    pub fn clear_history(&mut self) {
+        self.history.clear();
     }
     /// Re-reads `.devcode.json` and rebuilds the model; keeps tools and approval state.
     pub fn reload(&mut self, cli: &Cli) -> Result<(), DevCodeError> {
@@ -121,9 +176,28 @@ impl Session {
             .and_then(|dir| credentials::selected_slot_name(&dir, connector).ok())
             .unwrap_or_else(|| connector.to_owned());
         Some(format!(
-            "No API key for {name}. Run /connect (or: devcode auth login {name})."
+            "No API key for {name}. Run /connect to add one, or /provider to choose another provider."
         ))
     }
+    /// Configured context window of the current model, in tokens.
+    pub fn context_window(&self) -> Option<u64> {
+        self.config.provider.as_ref().map(|p| p.context_window)
+    }
+
+    /// Status line items saved by `/statusline`, if any.
+    pub fn statusline(&self) -> Option<Vec<String>> {
+        let dir = credentials::config_dir().ok()?;
+        settings::load_user_settings(&dir).ok()?.statusline
+    }
+
+    pub fn save_statusline(&self, items: Vec<String>) -> Result<(), DevCodeError> {
+        let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
+        let mut user =
+            settings::load_user_settings(&dir).map_err(|e| DevCodeError::Config(e.to_string()))?;
+        user.statusline = Some(items);
+        settings::save_user_settings(&dir, &user).map_err(|e| DevCodeError::Config(e.to_string()))
+    }
+
     pub fn provider_label(&self) -> String {
         match &self.config.provider {
             Some(p) => {
@@ -259,6 +333,32 @@ impl Session {
         }
         Ok(self.apply_provider(provider))
     }
+    /// Handle the TUI uses for /ps and /stop while a run works.
+    pub(crate) fn process_control(&self) -> Option<tools::managed::ProcessControl> {
+        self.tools.process_control()
+    }
+
+    /// Managed background processes, one line each.
+    pub fn processes(&self) -> Vec<String> {
+        self.tools
+            .with_processes(|processes, _| processes.list())
+            .unwrap_or_default()
+    }
+
+    /// Number of managed background processes still running.
+    pub fn running_processes(&self) -> usize {
+        self.tools
+            .with_processes(|processes, _| processes.running_count())
+            .unwrap_or(0)
+    }
+
+    /// Stops a managed background process by id.
+    pub fn stop_process(&self, id: &str) -> Result<String, String> {
+        self.tools
+            .with_processes(|processes, log| tools::managed::stop(processes, id, log))
+            .unwrap_or_else(|| Err("no managed processes in this session".into()))
+    }
+
     pub fn connections(&self) -> Result<Vec<String>, DevCodeError> {
         let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
         credentials::ensure_outside_workspace(&self.root, &dir)
@@ -705,6 +805,27 @@ fn build_model(provider: config::ProviderConfig) -> Result<Box<dyn agent::Model>
 
 #[cfg(test)]
 mod stream_enabled_tests {
+    #[test]
+    fn dangling_tool_calls_get_an_answer() {
+        use crate::agent::{Message, ToolCall};
+        let call = |id: &str| ToolCall {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            thought_signature: None,
+        };
+        let mut messages = vec![
+            Message::user("go"),
+            Message::assistant("", vec![call("a"), call("b")]),
+            Message::tool("ok", "a"),
+        ];
+        super::close_dangling_tool_calls(&mut messages);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[3].tool_call_id.as_deref(), Some("b"));
+        super::close_dangling_tool_calls(&mut messages);
+        assert_eq!(messages.len(), 4, "already answered calls stay as they are");
+    }
+
     use super::stream_enabled;
 
     #[test]

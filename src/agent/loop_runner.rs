@@ -2,7 +2,12 @@ use crate::agent::model::{CancelToken, Message, Model, ModelError, Request, Role
 use crate::agent::tool::ToolRegistry;
 use crate::discipline::summary::TaskSummary;
 use crate::profile::Profile;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Messages the user sends while a run works. The loop hands them to the model at its next
+/// step, as Codex steers a turn, instead of waiting for the run to end.
+pub type SteerInbox = Arc<Mutex<Vec<String>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {
@@ -31,9 +36,29 @@ pub enum ProgressEvent {
         name: String,
         ok: bool,
         preview: String,
+        /// Unified diff when the call edited a file (shown to the user, not the model).
+        diff: Option<String>,
     },
     /// Cumulative token usage after a model response.
     Usage { input: u64, output: u64 },
+    /// The model request failed on a dropped connection and is being retried from the start;
+    /// text streamed by the failed attempt is void.
+    Retry {
+        attempt: usize,
+        max: usize,
+        reason: String,
+    },
+    /// A message the user sent during the run went to the model.
+    Steered { text: String },
+}
+
+/// Retries for a model request that fails on a dropped connection (reset, timeout, early end).
+const NETWORK_RETRIES: usize = 3;
+
+/// Connection-level failures are worth retrying; HTTP status errors were already retried (or
+/// are final, like 401) inside the provider.
+fn retryable_network_error(reason: &str) -> bool {
+    !reason.contains("HTTP ")
 }
 
 /// Cloneable callback wrapper so `LoopLimits` keeps `Debug` and `Clone`.
@@ -103,6 +128,9 @@ pub struct LoopLimits {
     /// No sink (for example `--plain`) stays on one `complete` call.
     pub stream: bool,
     pub cancel: Option<CancelToken>,
+    /// Earlier turns of the conversation; the new user message is appended to them.
+    pub history: Vec<Message>,
+    pub steer: Option<SteerInbox>,
 }
 
 impl LoopLimits {
@@ -110,6 +138,22 @@ impl LoopLimits {
         if let Some(sink) = &self.progress {
             (sink.0)(event);
         }
+    }
+
+    /// Moves messages the user sent during the run into the conversation. True if any came.
+    fn take_steering(&self, messages: &mut Vec<Message>) -> bool {
+        let Some(inbox) = &self.steer else {
+            return false;
+        };
+        let texts: Vec<String> = match inbox.lock() {
+            Ok(mut queue) => queue.drain(..).collect(),
+            Err(_) => return false,
+        };
+        for text in &texts {
+            messages.push(Message::user(text.clone()));
+            self.emit(ProgressEvent::Steered { text: text.clone() });
+        }
+        !texts.is_empty()
     }
 
     fn is_cancelled(&self) -> bool {
@@ -128,6 +172,8 @@ impl Default for LoopLimits {
             progress: None,
             stream: true,
             cancel: None,
+            history: Vec::new(),
+            steer: None,
         }
     }
 }
@@ -207,7 +253,12 @@ fn run_loop(
     let mut last_tool_fingerprint: Option<(String, String, String)> = None;
     let mut identical_tool_streak = 0usize;
 
-    let mut messages = vec![Message::user(initial_user_message)];
+    let mut messages = limits.history.clone();
+    messages.push(Message::user(initial_user_message));
+    // The tool log spans the whole session; this run's summary counts only its own entries.
+    let log_start = crate::agent::session::session_state(tools)
+        .map(|s| s.log.entries.len())
+        .unwrap_or(0);
     let mut steps = 0;
     let mut total_input_tokens = 0;
     let mut total_output_tokens = 0;
@@ -232,6 +283,9 @@ fn run_loop(
         if start_time.elapsed() >= limits.max_wall_time {
             break ExitReason::TimeLimitExceeded;
         }
+        if steps > 0 {
+            limits.take_steering(&mut messages);
+        }
 
         let req = Request {
             system_prompt: match context.and_then(|(_, c)| c.verification.test_command.as_deref()) {
@@ -248,8 +302,9 @@ fn run_loop(
 
         let step_start = Instant::now();
         limits.emit(ProgressEvent::Thinking { step: steps + 1 });
-        let completion =
-            if limits.stream && limits.progress.is_some() {
+        let mut network_retries = 0;
+        let completion = loop {
+            let attempt = if limits.stream && limits.progress.is_some() {
                 let mut buffer = String::new();
                 let mut reasoning_buffer = String::new();
                 model.complete_stream_cancellable(&req, limits.cancel.as_ref(), &mut |chunk| {
@@ -275,6 +330,26 @@ fn run_loop(
             } else {
                 model.complete_cancellable(&req, limits.cancel.as_ref())
             };
+            match attempt {
+                Err(ModelError::Network(reason))
+                    if network_retries < NETWORK_RETRIES && retryable_network_error(&reason) =>
+                {
+                    network_retries += 1;
+                    limits.emit(ProgressEvent::Retry {
+                        attempt: network_retries,
+                        max: NETWORK_RETRIES,
+                        reason: reason.clone(),
+                    });
+                    let backoff = Duration::from_secs(1 << (network_retries - 1));
+                    if let Err(e) =
+                        crate::agent::sse::sleep_cancellable(limits.cancel.as_ref(), backoff)
+                    {
+                        break Err(e);
+                    }
+                }
+                other => break other,
+            }
+        };
         let mut response = match completion {
             Ok(resp) => {
                 consecutive_format_errors = 0;
@@ -340,6 +415,10 @@ fn run_loop(
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                 });
+            }
+            // A message sent while the model wrote its answer continues the same run.
+            if limits.take_steering(&mut messages) {
+                continue 'agent;
             }
             if profile == Profile::Build {
                 if let Some((root, config)) = context {
@@ -457,6 +536,7 @@ fn run_loop(
                 tool_ok = false;
                 format!("Run the configured test command first: {}. This records whether the problem reproduces.", cmd)
             } else {
+                tools.take_diff();
                 match tools.execute(call) {
                     Ok(output) => output,
                     Err(err) => {
@@ -471,6 +551,7 @@ fn run_loop(
                 name: call.name.clone(),
                 ok: tool_ok,
                 preview: preview_lines(&observation),
+                diff: tools.take_diff().map(|d| model.redact_sensitive(&d)),
             });
             output_bytes += observation.len();
             messages.push(Message::tool(observation.clone(), &call.id));
@@ -592,11 +673,20 @@ fn run_loop(
     };
 
     let state = crate::agent::session::session_state(tools)?;
+    let turn_log = crate::gate::tool_log::ToolLog {
+        entries: state
+            .log
+            .entries
+            .get(log_start..)
+            .unwrap_or_default()
+            .to_vec(),
+        test_workspace_hash: state.log.test_workspace_hash.clone(),
+    };
     let (files_edited, files_changed_by_commands, files_outside_scope, dependencies_added) =
-        crate::agent::session::summary_counts(&state.log);
+        crate::agent::session::summary_counts(&turn_log);
     let default_config = crate::config::Config::default();
     let (root, config) = context.unwrap_or((std::path::Path::new("."), &default_config));
-    let tests_changed = crate::gate::agent_test_changes(root, config, &state.log, &state.changes)
+    let tests_changed = crate::gate::agent_test_changes(root, config, &turn_log, &state.changes)
         .0
         .len();
     let summary = TaskSummary {

@@ -2,16 +2,26 @@
 use super::worker::{Cmd, Ev};
 use crate::agent::{ExitReason, LoopResult, ProgressEvent};
 use crate::Profile;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
+    /// Startup card: name, version, model, folder (as Claude Code and Codex open).
+    Welcome,
     User(String),
     Reasoning(String),
     Assistant(String),
-    Tool { name: String, summary: String },
-    ToolResult { ok: bool, preview: String },
+    Tool {
+        name: String,
+        summary: String,
+    },
+    ToolResult {
+        ok: bool,
+        preview: String,
+        diff: Option<String>,
+    },
     Info(String),
     Error(String),
     Note(String),
@@ -78,6 +88,14 @@ pub enum Action {
     Answer(String),
     /// Write `.devcode.json` for this provider, then reload.
     Init(String),
+    /// Hand a message typed during a run to the loop's next step.
+    Steer(String),
+    /// Take back a steering message that the loop has not read yet.
+    Unsteer(String),
+    /// List managed background processes (works during a run).
+    Processes,
+    /// Stop a managed background process by id (works during a run).
+    StopProcess(String),
     /// Cancel an in-flight model stream / agent run.
     Cancel,
     Quit,
@@ -109,17 +127,100 @@ pub struct App {
     history_pos: Option<usize>,
     pending_prompt: String,
     quit_armed: bool,
-    /// A new model call started; its assistant/reasoning text must not merge into an earlier bubble.
-    fresh_bubble: bool,
-    fresh_reasoning: bool,
+    /// Items holding the current model call's answer and reasoning. Streamed text replaces
+    /// these in place; tracking them by index keeps a late reasoning tail (held back for key
+    /// redaction) from starting a second copy after the answer has begun.
+    step_text: Option<usize>,
+    step_reasoning: Option<usize>,
     pub tick: usize,
     /// Index in `items` of an `Item::Tool` row shown expanded; `None` = all tool cards collapsed.
     pub expanded_tool: Option<usize>,
     /// Last model catalog from the provider (`/models` prefetch after connect/switch).
     pub models: Vec<String>,
+    /// Show model reasoning in the transcript (`/thinking`). Hidden by default, as in Codex.
+    pub show_thinking: bool,
+    /// When the current call's reasoning began; drives the footer's "thinking" label.
+    pub thinking_since: Option<Instant>,
+    /// Transcript area from the last draw, for mapping mouse positions to cells.
+    pub transcript_area: Rect,
+    /// Mouse text selection as (anchor, head), each (screen column, transcript row). Rows count
+    /// wrapped transcript lines from the top, so the selection survives scrolling.
+    pub selection: Option<((u16, usize), (u16, usize))>,
+    /// A left-button drag is in progress; at the top or bottom edge it scrolls (-1 / 1).
+    pub dragging: bool,
+    /// Configured context window and the size of the latest request, for the status line.
+    pub context_window: Option<u64>,
+    pub context_used: u64,
+    /// Git branch of the working folder, read at start and after each run.
+    pub branch: Option<String>,
+    /// Items shown on the right of the status line, in order (`/statusline`).
+    pub statusline: Vec<String>,
+    pub drag_edge: i8,
+    /// First transcript row on screen, set by each draw.
+    pub transcript_top: usize,
+    /// Set on mouse release; the next draw reads the selected cells into `copied`.
+    pub copy_requested: bool,
+    /// Selected text for the event loop to put on the clipboard.
+    pub copied: Option<String>,
+    /// Short footer notice and when it was set.
+    pub flash: Option<(String, Instant)>,
+    /// Messages typed while a run was working; sent together when it ends.
+    pub queued: Vec<String>,
+    /// Tool call in progress and when it started; drives the footer timer.
+    pub tool_since: Option<(String, Instant)>,
+    /// Managed background processes still running.
+    pub bg_processes: usize,
+    /// Highlighted option in the approval panel.
+    pub approval_choice: usize,
+    /// Highlighted slash command suggestion while typing `/…`.
+    pub suggest: usize,
 }
 
-const HELP: &str = "Enter       send message or command
+/// One option in the approval panel: label shown, line sent to the approval code, transcript note.
+pub struct ApprovalChoice {
+    pub label: &'static str,
+    pub key: &'static str,
+    pub answer: &'static str,
+    pub note: &'static str,
+}
+
+pub const EDIT_CHOICES: &[ApprovalChoice] = &[
+    ApprovalChoice {
+        label: "Yes, apply this edit",
+        key: "y",
+        answer: "y",
+        note: "edit approved",
+    },
+    ApprovalChoice {
+        label: "Yes, and approve every edit this session",
+        key: "a",
+        answer: "a",
+        note: "edit approved; later edits this session are approved too",
+    },
+    ApprovalChoice {
+        label: "No, and tell DevCode what to do instead",
+        key: "esc",
+        answer: "n",
+        note: "edit rejected; type what to do instead",
+    },
+];
+
+pub const CONFIRM_CHOICES: &[ApprovalChoice] = &[
+    ApprovalChoice {
+        label: "Yes, run it",
+        key: "y",
+        answer: "y",
+        note: "approved",
+    },
+    ApprovalChoice {
+        label: "No, and tell DevCode what to do instead",
+        key: "esc",
+        answer: "n",
+        note: "rejected; type what to do instead",
+    },
+];
+
+const HELP: &str = "Enter       send message or command (queued while a run works)
 /ask /plan /build   switch profile (ask and plan are read-only)
 /model [ID]         pick a model (catalog loads on connect/switch) or set one
 /provider [NAME]    switch provider (saved as your default; refreshes models)
@@ -128,13 +229,19 @@ const HELP: &str = "Enter       send message or command
 /connections        list accounts (stored|env|missing; * = active)
 /init [NAME]        optional project scaffold (.devcode.json)
 /rollback [N]       undo the latest run (or step N and later)
-/clear              clear the screen
+/thinking           show or hide model thinking (hidden by default)
+/ps                 list background processes (dev servers)
+/stop ID            stop a background process
+/status             model, context use, tokens, branch, folder
+/statusline [ITEM]  show or hide a status line item
+/clear              clear the screen and start a new conversation
 /exit               quit
 PgUp/PgDn           scroll transcript
 Ctrl-End            jump to latest (when scrolled up)
 Ctrl-T              expand/collapse latest tool card
 Ctrl-K              command palette (search slash commands)
-Up/Down             transcript scroll (non-empty: move line; top/bottom edge scrolls)
+Up/Down             input history when empty; otherwise move line (edges scroll)
+Mouse drag          select transcript text; release copies it
 Ctrl-P / Ctrl-N     input history (works even when typing)
 Shift+Enter         new line in message (Alt+Enter also)
 Shift-Tab           cycle ask → plan → build
@@ -160,21 +267,40 @@ impl App {
             history_pos: None,
             pending_prompt: String::new(),
             quit_armed: false,
-            fresh_bubble: false,
-            fresh_reasoning: false,
+            step_text: None,
+            step_reasoning: None,
             tick: 0,
             expanded_tool: None,
             models: Vec::new(),
+            show_thinking: false,
+            thinking_since: None,
+            transcript_area: Rect::default(),
+            selection: None,
+            dragging: false,
+            context_window: None,
+            context_used: 0,
+            branch: git_branch(),
+            statusline: STATUSLINE_ITEMS
+                .iter()
+                .map(|(n, _)| n.to_string())
+                .collect(),
+            drag_edge: 0,
+            transcript_top: 0,
+            copy_requested: false,
+            copied: None,
+            flash: None,
+            queued: Vec::new(),
+            tool_since: None,
+            bg_processes: 0,
+            approval_choice: 0,
+            suggest: 0,
         };
-        app.items.push(Item::Note(
-            "Describe a task, or type /help. Edits ask for approval and can be undone with /rollback."
-                .into(),
-        ));
+        app.items.push(Item::Welcome);
         if let Some(note) = startup_note {
             app.items.push(Item::Info(note));
         } else if app.provider == "no provider" {
             app.items.push(Item::Info(
-                "Run /provider nim or /provider gemini, then /connect.".into(),
+                "Run /provider to choose a provider, then /connect to add an API key.".into(),
             ));
         }
         app
@@ -192,11 +318,22 @@ impl App {
             Ev::PromptText(text) => self.pending_prompt.push_str(&text),
             Ev::NeedInput => {
                 let text = std::mem::take(&mut self.pending_prompt);
-                self.modal = Some(classify_prompt(text));
+                let modal = classify_prompt(text);
+                // Enter must not run a risky command by default; edits and dev servers start on Yes.
+                self.approval_choice = match &modal {
+                    Modal::Confirm { text, .. } if !text.contains("long-running") => {
+                        CONFIRM_CHOICES.len() - 1
+                    }
+                    _ => 0,
+                };
+                self.modal = Some(modal);
             }
             Ev::Done(result) => self.on_done(*result),
+            Ev::Processes(count) => self.bg_processes = count,
             Ev::Failed(message) => {
                 self.status = Status::Idle;
+                self.tool_since = None;
+                self.thinking_since = None;
                 self.pending_prompt.clear();
                 self.items.push(Item::Error(hint_for(&message)));
             }
@@ -205,7 +342,9 @@ impl App {
                     self.items.push(Item::Info(line));
                 }
             }
-            Ev::Provider(label) => {
+            Ev::Provider(label, window) => {
+                self.context_window = window;
+                self.context_used = 0;
                 // Drop the previous provider's catalog; prefetch fills models next.
                 self.models.clear();
                 self.items.push(Item::Info(format!("now using {label}")));
@@ -246,7 +385,6 @@ impl App {
         );
         match result {
             Ok(list) => {
-                let n = list.len();
                 self.models = list.clone();
                 if let Some(Modal::Picker {
                     kind: PickKind::Model,
@@ -257,9 +395,6 @@ impl App {
                 {
                     *items = list;
                     *loading = false;
-                } else if n > 0 {
-                    self.items
-                        .push(Item::Info(format!("{n} models ready — /model to pick")));
                 }
             }
             Err(message) => {
@@ -270,69 +405,278 @@ impl App {
                         "cannot list models: {message}. Use /model ID to set one directly."
                     )));
                 } else {
-                    // Background prefetch (connect/provider) without a key is common.
                     self.items.push(Item::Info(format!(
-                        "model list unavailable ({message}); /connect then /model"
+                        "model list unavailable ({message}). Run /model to retry."
                     )));
                 }
             }
         }
     }
 
-    fn merge_assistant_progress(&mut self, text: String) {
+    /// Merges streamed text into the current call's answer (`reasoning == false`) or reasoning
+    /// item: cumulative text replaces it, a delta appends. A user message or tool card after that
+    /// item starts a new one, so text never jumps above later activity.
+    fn merge_step_text(&mut self, text: String, reasoning: bool) {
         if text.is_empty() {
             return;
         }
-        let fresh = std::mem::take(&mut self.fresh_bubble);
-        if let (false, Some(Item::Assistant(last))) = (fresh, self.items.last_mut()) {
-            if text == *last {
-                return;
+        let slot = if reasoning {
+            self.step_reasoning
+        } else {
+            self.step_text
+        };
+        let open = slot.filter(|&i| {
+            self.items.get(i + 1..).is_some_and(|after| {
+                !after.iter().any(|item| {
+                    matches!(
+                        item,
+                        Item::User(_) | Item::Tool { .. } | Item::ToolResult { .. }
+                    )
+                })
+            })
+        });
+        if let Some(item) = open.and_then(|i| self.items.get_mut(i)) {
+            match (item, reasoning) {
+                (Item::Reasoning(last), true) | (Item::Assistant(last), false) => {
+                    if text.starts_with(last.as_str()) {
+                        *last = text;
+                    } else if !last.ends_with(&text) {
+                        last.push_str(&text);
+                    }
+                    return;
+                }
+                _ => {}
             }
-            if text.starts_with(last.as_str()) {
-                *last = text;
-                return;
-            }
-            last.push_str(&text);
-            return;
         }
-        self.items.push(Item::Assistant(text));
+        let index = Some(self.items.len());
+        if reasoning {
+            self.items.push(Item::Reasoning(text));
+            self.step_reasoning = index;
+        } else {
+            self.items.push(Item::Assistant(text));
+            self.step_text = index;
+        }
     }
 
-    fn merge_reasoning_progress(&mut self, text: String) {
-        if text.is_empty() {
+    /// Mouse input: the wheel scrolls; a left-button drag inside the transcript selects text,
+    /// and releasing the button asks the next draw to copy it.
+    pub fn on_mouse(&mut self, event: MouseEvent) {
+        if self.modal.is_some() {
             return;
         }
-        let fresh = std::mem::take(&mut self.fresh_reasoning);
-        if let (false, Some(Item::Reasoning(last))) = (fresh, self.items.last_mut()) {
-            if text == *last {
-                return;
-            }
-            if text.starts_with(last.as_str()) {
-                *last = text;
-                return;
-            }
-            last.push_str(&text);
+        let area = self.transcript_area;
+        if area.is_empty() {
             return;
         }
-        self.items.push(Item::Reasoning(text));
+        let (col, row) = (event.column, event.row);
+        let inside = area.contains(Position::new(col, row));
+        let x = col.clamp(area.x, area.right() - 1);
+        let y = row.clamp(area.y, area.bottom() - 1);
+        let at = (x, self.transcript_top + (y - area.y) as usize);
+        match event.kind {
+            MouseEventKind::ScrollUp => self.on_mouse_scroll(true),
+            MouseEventKind::ScrollDown => self.on_mouse_scroll(false),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = inside.then_some((at, at));
+                self.dragging = inside;
+                self.drag_edge = 0;
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
+                // Past the top or bottom edge the transcript scrolls under the pointer.
+                self.drag_edge = if row <= area.y {
+                    -1
+                } else if row >= area.bottom() - 1 {
+                    1
+                } else {
+                    0
+                };
+                if let Some((_, head)) = &mut self.selection {
+                    *head = at;
+                }
+                self.drag_scroll();
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.dragging = false;
+                self.drag_edge = 0;
+                match self.selection {
+                    Some((anchor, head)) if anchor != head => self.copy_requested = true,
+                    _ => self.selection = None,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Share of the context window still free after the latest request, as Gemini CLI shows it.
+    pub fn context_left(&self) -> Option<u64> {
+        let window = self.context_window.filter(|w| *w > 0)?;
+        (self.context_used > 0).then(|| 100 - (self.context_used.min(window) * 100 / window))
+    }
+
+    fn status_lines(&self) -> Vec<String> {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let context = match (self.context_window, self.context_used) {
+            (Some(w), 0) => format!("{} window, nothing sent yet", tokens(w)),
+            (Some(w), used) => format!(
+                "{} of {} used ({}% left)",
+                tokens(used),
+                tokens(w),
+                self.context_left().unwrap_or(0)
+            ),
+            (None, _) => "unknown window".into(),
+        };
+        vec![
+            format!(
+                "DevCode v{} · profile {}",
+                env!("CARGO_PKG_VERSION"),
+                self.profile.name()
+            ),
+            format!("model       {}", self.provider),
+            format!("context     {context}"),
+            format!(
+                "tokens      {} in / {} out this session",
+                tokens(self.total_in),
+                tokens(self.total_out)
+            ),
+            format!(
+                "branch      {}",
+                self.branch.as_deref().unwrap_or("(not a git repo)")
+            ),
+            format!("folder      {}", cwd.display()),
+            format!("background  {} running (/ps)", self.bg_processes),
+        ]
+    }
+
+    /// `/statusline` lists the items; `/statusline ITEM` shows or hides one and saves the set.
+    fn statusline_command(&mut self, arg: Option<&str>) -> Vec<Action> {
+        let Some(name) = arg else {
+            for (name, about) in STATUSLINE_ITEMS {
+                let on = if self.statusline.iter().any(|s| s == name) {
+                    "on "
+                } else {
+                    "off"
+                };
+                self.items
+                    .push(Item::Note(format!("{on}  {name:<10} {about}")));
+            }
+            self.items
+                .push(Item::Note("/statusline ITEM shows or hides one".into()));
+            return Vec::new();
+        };
+        if !STATUSLINE_ITEMS.iter().any(|(n, _)| *n == name) {
+            let names: Vec<&str> = STATUSLINE_ITEMS.iter().map(|(n, _)| *n).collect();
+            self.items.push(Item::Error(format!(
+                "unknown item '{name}'; one of: {}",
+                names.join(", ")
+            )));
+            return Vec::new();
+        }
+        if let Some(at) = self.statusline.iter().position(|s| s == name) {
+            self.statusline.remove(at);
+            self.flash = Some((format!("status line: {name} hidden"), Instant::now()));
+        } else {
+            // Keep the default order so the drop order on narrow rows stays predictable.
+            self.statusline.push(name.to_string());
+            self.statusline
+                .sort_by_key(|s| STATUSLINE_ITEMS.iter().position(|(n, _)| n == s));
+            self.flash = Some((format!("status line: {name} shown"), Instant::now()));
+        }
+        vec![Action::Send(Cmd::SaveStatusline(self.statusline.clone()))]
+    }
+
+    /// Called every frame: keeps scrolling while a drag rests on the top or bottom edge.
+    pub fn on_tick(&mut self) {
+        if self.dragging && self.drag_edge != 0 {
+            self.drag_scroll();
+        }
+    }
+
+    fn drag_scroll(&mut self) {
+        let Some((_, head)) = &mut self.selection else {
+            return;
+        };
+        match self.drag_edge {
+            -1 if self.transcript_top > 0 => {
+                head.1 = head.1.saturating_sub(1);
+                self.transcript_top -= 1;
+                self.scroll_transcript(1);
+            }
+            1 if self.scroll > 0 => {
+                head.1 += 1;
+                self.transcript_top += 1;
+                self.scroll_transcript(-1);
+            }
+            _ => {}
+        }
     }
 
     fn on_progress(&mut self, p: ProgressEvent) {
         match p {
             ProgressEvent::Thinking { step } => {
                 self.status = Status::Working { step };
-                self.fresh_bubble = true;
-                self.fresh_reasoning = true;
+                self.tool_since = None;
+                self.step_text = None;
+                self.step_reasoning = None;
+                self.thinking_since = None;
             }
-            ProgressEvent::Reasoning { text } => self.merge_reasoning_progress(text),
-            ProgressEvent::Assistant { text } => self.merge_assistant_progress(text),
+            ProgressEvent::Reasoning { text } => {
+                self.thinking_since.get_or_insert_with(Instant::now);
+                self.merge_step_text(text, true);
+            }
+            ProgressEvent::Assistant { text } => {
+                self.thinking_since = None;
+                self.merge_step_text(text, false);
+            }
             ProgressEvent::ToolCall { name, summary } => {
+                self.thinking_since = None;
+                self.tool_since = Some((name.clone(), Instant::now()));
                 self.items.push(Item::Tool { name, summary })
             }
-            ProgressEvent::ToolResult { ok, preview, .. } => {
-                self.items.push(Item::ToolResult { ok, preview })
+            ProgressEvent::ToolResult {
+                ok, preview, diff, ..
+            } => {
+                self.tool_since = None;
+                // Approval notes land between a call and its result; keep the result on its card.
+                let card = self
+                    .items
+                    .iter()
+                    .rposition(|item| matches!(item, Item::Tool { .. }))
+                    .filter(|&t| {
+                        self.items[t + 1..]
+                            .iter()
+                            .all(|item| matches!(item, Item::Info(_) | Item::Note(_)))
+                    });
+                let result = Item::ToolResult { ok, preview, diff };
+                match card {
+                    Some(t) => self.items.insert(t + 1, result),
+                    None => self.items.push(result),
+                }
+            }
+            ProgressEvent::Steered { text } => {
+                if let Some(at) = self.queued.iter().position(|q| *q == text) {
+                    self.queued.remove(at);
+                }
+                self.items.push(Item::User(text));
+            }
+            ProgressEvent::Retry { attempt, max, .. } => {
+                // The failed attempt's streamed text is void; the retry streams the step again.
+                if let Some(start) = [self.step_reasoning, self.step_text]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                {
+                    self.items.truncate(start.min(self.items.len()));
+                }
+                self.step_text = None;
+                self.step_reasoning = None;
+                self.thinking_since = None;
+                self.items.push(Item::Info(format!(
+                    "connection lost; retrying ({attempt}/{max})"
+                )));
             }
             ProgressEvent::Usage { input, output } => {
+                // Usage is cumulative per run; the step's own input is the context it sent.
+                self.context_used = input.saturating_sub(self.run_in);
                 self.run_in = input;
                 self.run_out = output;
             }
@@ -341,6 +685,9 @@ impl App {
 
     fn on_done(&mut self, result: LoopResult) {
         self.status = Status::Idle;
+        self.branch = git_branch();
+        self.tool_since = None;
+        self.thinking_since = None;
         self.quit_armed = false;
         self.pending_prompt.clear();
         self.total_in += result.total_input_tokens;
@@ -353,27 +700,47 @@ impl App {
             .as_ref()
             .is_some_and(|s| s.files_edited > 0 || s.files_changed_by_commands > 0);
         if let Some(v) = result.verification.as_ref().filter(|_| changed) {
-            for line in v.lines().filter(|l| !l.trim().is_empty()) {
-                self.items.push(Item::Note(line.to_string()));
+            let v = v.trim_start_matches("Verification Summary:").trim();
+            if v.starts_with("UNVERIFIED. No test command") {
+                self.items.push(Item::Note(
+                    "untested: no test command (set verification.test_command in .devcode.json)"
+                        .into(),
+                ));
+            } else {
+                for line in v.lines().filter(|l| !l.trim().is_empty()) {
+                    self.items.push(Item::Note(line.trim().to_string()));
+                }
             }
         }
         if let Some(s) = &result.summary {
             let mut parts = vec![
-                format!("{} step{}", s.steps, if s.steps == 1 { "" } else { "s" }),
-                format!("{} in / {} out tokens", s.tokens_in, s.tokens_out),
+                plural(s.steps, "step", "steps"),
+                format!(
+                    "{} in / {} out tokens",
+                    tokens(s.tokens_in),
+                    tokens(s.tokens_out)
+                ),
             ];
             let counts = [
-                (s.files_edited, "file(s) edited"),
-                (s.tests_changed, "test file(s) changed"),
-                (s.files_changed_by_commands, "file(s) changed by commands"),
-                (s.files_outside_scope, "outside scope"),
-                (s.dependencies_added, "dependencies added"),
+                (s.files_edited, "file edited", "files edited"),
+                (s.tests_changed, "test file changed", "test files changed"),
+                (
+                    s.files_changed_by_commands,
+                    "file changed by commands",
+                    "files changed by commands",
+                ),
+                (s.files_outside_scope, "outside scope", "outside scope"),
+                (
+                    s.dependencies_added,
+                    "dependency added",
+                    "dependencies added",
+                ),
             ];
             parts.extend(
                 counts
                     .iter()
-                    .filter(|(n, _)| *n > 0)
-                    .map(|(n, what)| format!("{n} {what}")),
+                    .filter(|(n, ..)| *n > 0)
+                    .map(|&(n, one, many)| plural(n, one, many)),
             );
             self.items.push(Item::Note(parts.join(" · ")));
         }
@@ -407,18 +774,21 @@ impl App {
             }
             Some(_) => {}
             None => {
-                for c in clean.chars() {
-                    if c == '\n' {
-                        self.insert_newline();
-                    } else {
-                        self.insert(c);
-                    }
-                }
+                // One insertion keeps large pastes linear. Tabs stay tabs (Makefiles, Go); the
+                // input box draws them as four columns.
+                let text: String = clean
+                    .chars()
+                    .filter(|c| matches!(c, '\n' | '\t') || !c.is_control())
+                    .collect();
+                let at = self.byte_at(self.cursor);
+                self.input.insert_str(at, &text);
+                self.cursor += text.chars().count();
             }
         }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        self.selection = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             return self.on_ctrl_c();
@@ -427,6 +797,74 @@ impl App {
         if self.modal.is_some() {
             return self.on_modal_key(key);
         }
+        if let Some(actions) = self.suggestion_key(key) {
+            return actions;
+        }
+        let before = self.input.len();
+        let actions = self.input_key(key, ctrl);
+        if self.input.len() != before {
+            self.suggest = 0;
+        }
+        actions
+    }
+
+    /// Slash commands matching what is typed, as Claude Code and Codex list them under the
+    /// input: prefix matches first, then names that contain the text.
+    pub fn suggestions(&self) -> Vec<(&'static str, &'static str)> {
+        let typed = self.input.as_str();
+        if self.modal.is_some() || !typed.starts_with('/') || typed.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let names = slash_command_items();
+        let prefix = names.iter().filter(|n| n.starts_with(typed));
+        let inner = names
+            .iter()
+            .filter(|n| !n.starts_with(typed) && n.contains(&typed[1..]));
+        prefix
+            .chain(inner)
+            .map(|n| (*n, command_about(n)))
+            .collect()
+    }
+
+    /// Up/Down pick a suggestion, Tab completes it, Enter runs it. None: not a suggestion key.
+    fn suggestion_key(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
+        let list = self.suggestions();
+        if list.is_empty() || !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            return None;
+        }
+        let pick = self.suggest.min(list.len() - 1);
+        match key.code {
+            KeyCode::Up => self.suggest = pick.checked_sub(1).unwrap_or(list.len() - 1),
+            KeyCode::Down => self.suggest = (pick + 1) % list.len(),
+            KeyCode::Tab => {
+                let name = list[pick].0;
+                self.input = if takes_argument(name) {
+                    format!("{name} ")
+                } else {
+                    name.to_string()
+                };
+                self.cursor = self.input.chars().count();
+                self.suggest = 0;
+            }
+            KeyCode::Enter => {
+                let name = list[pick].0;
+                if self.input != name && takes_argument(name) {
+                    // Commands with arguments complete first so the argument can be typed.
+                    self.input = format!("{name} ");
+                    self.cursor = self.input.chars().count();
+                    self.suggest = 0;
+                    return Some(Vec::new());
+                }
+                self.input = name.to_string();
+                self.suggest = 0;
+                return Some(self.submit());
+            }
+            _ => return None,
+        }
+        Some(Vec::new())
+    }
+
+    fn input_key(&mut self, key: KeyEvent, ctrl: bool) -> Vec<Action> {
         match key.code {
             KeyCode::Enter
                 if key.modifiers.contains(KeyModifiers::SHIFT)
@@ -472,7 +910,21 @@ impl App {
             KeyCode::Home => self.cursor = self.line_start(self.cursor),
             KeyCode::End if ctrl => self.scroll = 0,
             KeyCode::End => self.cursor = self.line_end(self.cursor),
+            KeyCode::Esc if self.input.is_empty() && !self.queued.is_empty() => {
+                // Pull the last queued message back for editing.
+                if let Some(last) = self.queued.pop() {
+                    self.cursor = last.chars().count();
+                    self.input = last.clone();
+                    return vec![Action::Unsteer(last)];
+                }
+            }
             KeyCode::Esc => {
+                // Recoverable with Up: the cleared text goes into history.
+                let cleared = self.input.trim().to_string();
+                if !cleared.is_empty() && self.history.last() != Some(&cleared) {
+                    self.history.push(cleared);
+                }
+                self.history_pos = None;
                 self.input.clear();
                 self.cursor = 0;
             }
@@ -496,9 +948,18 @@ impl App {
             Profile::Build => Profile::Ask,
         };
         self.profile = next;
-        self.items
-            .push(Item::Info(format!("profile: {}", next.name())));
+        self.flash_profile();
         vec![Action::Send(Cmd::SetProfile(next))]
+    }
+
+    /// The info row badge shows the profile; a short notice says what it allows.
+    fn flash_profile(&mut self) {
+        let note = match self.profile {
+            Profile::Ask => "ask: read-only answers",
+            Profile::Plan => "plan: read-only planning",
+            Profile::Build => "build: edits and commands, with approval",
+        };
+        self.flash = Some((note.into(), Instant::now()));
     }
 
     fn on_ctrl_c(&mut self) -> Vec<Action> {
@@ -513,8 +974,23 @@ impl App {
             Some(_) => return Vec::new(),
             None => {}
         }
-        if !self.is_working() || self.quit_armed {
+        if self.quit_armed {
             return vec![Action::Quit];
+        }
+        if !self.is_working() {
+            // Like Claude Code and Codex: Ctrl-C clears a draft, and quitting takes a second press.
+            let draft = self.input.trim().to_string();
+            if !draft.is_empty() {
+                if self.history.last() != Some(&draft) {
+                    self.history.push(draft);
+                }
+                self.input.clear();
+                self.cursor = 0;
+                return Vec::new();
+            }
+            self.quit_armed = true;
+            self.flash = Some(("press Ctrl-C again to quit".into(), Instant::now()));
+            return Vec::new();
         }
         self.quit_armed = true;
         self.items.push(Item::Info(
@@ -528,35 +1004,12 @@ impl App {
             return Vec::new();
         };
         match modal {
-            Modal::Approve { text, scroll } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.answer("y", "edit approved"),
-                KeyCode::Char('a') | KeyCode::Char('A') => {
-                    self.answer("a", "edit approved; will approve all edits this session")
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.answer("n", "edit rejected")
-                }
-                code => {
-                    self.modal = Some(Modal::Approve {
-                        scroll: scrolled(scroll, code),
-                        text,
-                    });
-                    Vec::new()
-                }
-            },
-            Modal::Confirm { text, scroll } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.answer("y", "approved"),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.answer("n", "rejected")
-                }
-                code => {
-                    self.modal = Some(Modal::Confirm {
-                        scroll: scrolled(scroll, code),
-                        text,
-                    });
-                    Vec::new()
-                }
-            },
+            Modal::Approve { text, scroll } => {
+                self.approval_key(Modal::Approve { text, scroll }, key.code, EDIT_CHOICES)
+            }
+            Modal::Confirm { text, scroll } => {
+                self.approval_key(Modal::Confirm { text, scroll }, key.code, CONFIRM_CHOICES)
+            }
             Modal::Text { text, mut input } => match key.code {
                 KeyCode::Enter => {
                     let line = input.trim().to_string();
@@ -688,6 +1141,58 @@ impl App {
             }
             Modal::Help => Vec::new(),
         }
+    }
+
+    /// Keys in the approval panel: ↑↓ pick an option, Enter or a number confirms it, y/a/n
+    /// answer directly, Esc rejects, PgUp/PgDn scroll the diff.
+    fn approval_key(
+        &mut self,
+        modal: Modal,
+        code: KeyCode,
+        choices: &[ApprovalChoice],
+    ) -> Vec<Action> {
+        let by_answer = |answer: &str| choices.iter().position(|c| c.answer == answer);
+        let pick = match code {
+            KeyCode::Enter => Some(self.approval_choice.min(choices.len() - 1)),
+            KeyCode::Char(c @ '1'..='9') => {
+                Some(c as usize - '1' as usize).filter(|&i| i < choices.len())
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => by_answer("y"),
+            KeyCode::Char('a') | KeyCode::Char('A') => by_answer("a"),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => by_answer("n"),
+            _ => None,
+        };
+        if let Some(i) = pick {
+            let choice = &choices[i];
+            return self.answer(choice.answer, choice.note);
+        }
+        match code {
+            KeyCode::Up => self.approval_choice = self.approval_choice.saturating_sub(1),
+            KeyCode::Down => {
+                self.approval_choice = (self.approval_choice + 1).min(choices.len() - 1)
+            }
+            _ => {}
+        }
+        self.modal = Some(match modal {
+            Modal::Approve { text, scroll }
+                if matches!(code, KeyCode::PageUp | KeyCode::PageDown) =>
+            {
+                Modal::Approve {
+                    text,
+                    scroll: scrolled(scroll, code),
+                }
+            }
+            Modal::Confirm { text, scroll }
+                if matches!(code, KeyCode::PageUp | KeyCode::PageDown) =>
+            {
+                Modal::Confirm {
+                    text,
+                    scroll: scrolled(scroll, code),
+                }
+            }
+            other => other,
+        });
+        Vec::new()
     }
 
     fn answer(&mut self, line: &str, note: &str) -> Vec<Action> {
@@ -918,17 +1423,30 @@ impl App {
         if let Some(rest) = line.strip_prefix('/') {
             return self.slash(rest.trim());
         }
+        // A message typed during a run reaches the model at its next step (as Codex steers).
         if self.is_working() {
-            self.items
-                .push(Item::Info("still working; wait for the current run".into()));
-            return Vec::new();
+            self.queued.push(line.clone());
+            return vec![Action::Steer(line)];
         }
+        vec![Action::Send(self.start_run(line))]
+    }
+
+    fn start_run(&mut self, line: String) -> Cmd {
         self.items.push(Item::User(line.clone()));
         self.status = Status::Working { step: 0 };
         self.started = Some(Instant::now());
         self.run_in = 0;
         self.run_out = 0;
-        vec![Action::Send(Cmd::Prompt(line))]
+        Cmd::Prompt(line)
+    }
+
+    /// Queued messages, joined into one prompt, once the run and any dialog have finished.
+    pub fn next_queued(&mut self) -> Option<Cmd> {
+        if self.is_working() || self.modal.is_some() || self.queued.is_empty() {
+            return None;
+        }
+        let line = std::mem::take(&mut self.queued).join("\n\n");
+        Some(self.start_run(line))
     }
 
     fn slash(&mut self, rest: &str) -> Vec<Action> {
@@ -951,8 +1469,7 @@ impl App {
                     _ => Profile::Build,
                 };
                 self.profile = profile;
-                self.items
-                    .push(Item::Info(format!("profile: {}", profile.name())));
+                self.flash_profile();
                 vec![Action::Send(Cmd::SetProfile(profile))]
             }
             "connect" => {
@@ -961,7 +1478,7 @@ impl App {
                 }
                 if self.provider == "no provider" {
                     self.items.push(Item::Error(
-                        "Run /provider nim or /provider gemini, then /connect.".into(),
+                        "Run /provider to choose a provider, then /connect.".into(),
                     ));
                     return Vec::new();
                 }
@@ -993,12 +1510,46 @@ impl App {
                 Vec::new()
             }
             "clear" => {
+                if busy {
+                    return busy_block(&mut self.items);
+                }
                 self.items.clear();
                 self.expanded_tool = None;
-                Vec::new()
+                self.total_in = 0;
+                self.total_out = 0;
+                self.context_used = 0;
+                self.items.push(Item::Note(
+                    "New conversation. Earlier messages are forgotten.".into(),
+                ));
+                vec![Action::Send(Cmd::ClearHistory)]
             }
             "help" | "?" => {
                 self.modal = Some(Modal::Help);
+                Vec::new()
+            }
+            "ps" | "processes" => vec![Action::Processes],
+            "status" => {
+                for line in self.status_lines() {
+                    self.items.push(Item::Note(line));
+                }
+                Vec::new()
+            }
+            "statusline" => self.statusline_command(arg),
+            "stop" => match arg {
+                Some(id) => vec![Action::StopProcess(id.to_string())],
+                None => {
+                    self.items
+                        .push(Item::Info("usage: /stop ID (see /ps for ids)".into()));
+                    Vec::new()
+                }
+            },
+            "thinking" => {
+                self.show_thinking = !self.show_thinking;
+                self.items.push(Item::Info(if self.show_thinking {
+                    "model thinking is shown; /thinking hides it".into()
+                } else {
+                    "model thinking is hidden; /thinking shows it".into()
+                }));
                 Vec::new()
             }
             "exit" | "quit" => vec![Action::Quit],
@@ -1030,7 +1581,7 @@ impl App {
             ("model", None) => {
                 if self.provider == "no provider" {
                     self.items.push(Item::Error(
-                        "No provider yet. Run /provider nim or /provider gemini first.".into(),
+                        "No provider yet. Run /provider to choose one.".into(),
                     ));
                     return Vec::new();
                 }
@@ -1053,7 +1604,7 @@ impl App {
             _ => {
                 if self.provider == "no provider" {
                     self.items.push(Item::Error(
-                        "No provider yet. Run /provider nim or /provider gemini first.".into(),
+                        "No provider yet. Run /provider to choose one.".into(),
                     ));
                     return Vec::new();
                 }
@@ -1070,6 +1621,36 @@ pub fn help_text() -> &'static str {
 }
 
 /// Slash commands shown in the command palette (same set as `/help`).
+/// One-line description shown next to a slash command suggestion.
+pub fn command_about(name: &str) -> &'static str {
+    match name {
+        "/ask" => "read-only answers",
+        "/plan" => "read-only planning",
+        "/build" => "edit files and run commands, with approval",
+        "/model" => "pick or set the model",
+        "/provider" => "switch provider",
+        "/effort" => "reasoning effort for this model",
+        "/connect" => "store an API key",
+        "/connections" => "list accounts and keys",
+        "/init" => "create .devcode.json for this project",
+        "/rollback" => "undo the latest run (or step N and later)",
+        "/thinking" => "show or hide model thinking",
+        "/ps" => "list background processes",
+        "/stop" => "stop a background process",
+        "/status" => "model, context, tokens, branch and folder",
+        "/statusline" => "choose what the status line shows",
+        "/clear" => "start a new conversation",
+        "/help" => "keys and commands",
+        "/exit" => "quit",
+        _ => "",
+    }
+}
+
+/// Commands that read an argument; completing them leaves room to type it.
+fn takes_argument(name: &str) -> bool {
+    matches!(name, "/stop" | "/rollback" | "/init" | "/statusline")
+}
+
 pub fn slash_command_items() -> &'static [&'static str] {
     &[
         "/ask",
@@ -1082,10 +1663,61 @@ pub fn slash_command_items() -> &'static [&'static str] {
         "/connections",
         "/init",
         "/rollback",
+        "/thinking",
+        "/ps",
+        "/stop",
+        "/status",
+        "/statusline",
         "/clear",
         "/help",
         "/exit",
     ]
+}
+
+/// Status line items (name, what it shows), in their default order. When the row is too
+/// narrow the last ones are dropped first.
+pub const STATUSLINE_ITEMS: &[(&str, &str)] = &[
+    ("processes", "background processes"),
+    ("context", "context left"),
+    ("tokens", "session tokens in / out"),
+    ("branch", "git branch"),
+    ("folder", "working folder"),
+];
+
+/// Current git branch (or short commit when detached), read from `.git/HEAD` without git.
+pub fn git_branch() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let dot_git = cwd
+        .ancestors()
+        .map(|d| d.join(".git"))
+        .find(|p| p.exists())?;
+    // Worktrees and submodules point to the real git dir from a `.git` file.
+    let git_dir = if dot_git.is_file() {
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let dir = text.trim().strip_prefix("gitdir:")?.trim().to_string();
+        dot_git.parent()?.join(dir)
+    } else {
+        dot_git
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    Some(match head.strip_prefix("ref: refs/heads/") {
+        Some(branch) => branch.to_string(),
+        None => head.chars().take(7).collect(),
+    })
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Token counts as people read them: 504, 40.5k, 1.2M.
+pub(crate) fn tokens(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
 }
 
 fn scrolled(scroll: u16, code: KeyCode) -> u16 {
@@ -1118,7 +1750,7 @@ fn hint_for(message: &str) -> String {
     if message.contains("devcode auth login") {
         format!("{message}. Run /connect or devcode auth login.")
     } else if message.contains("provider.model is missing") {
-        format!("{message}. Run /provider nim or /provider gemini, then /connect.")
+        format!("{message}. Run /provider to choose a provider, then /connect.")
     } else if message.contains("HTTP 401") || message.contains("HTTP 403") {
         format!("{message}. The key was rejected; run /connect to store a new one.")
     } else if message.contains("no API key")
@@ -1220,7 +1852,10 @@ mod tests {
         type_str(&mut a, "one");
         a.on_key(key(KeyCode::Enter));
         type_str(&mut a, "two");
-        assert!(a.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(
+            matches!(&a.on_key(key(KeyCode::Enter))[..], [Action::Steer(t)] if t == "two"),
+            "a second prompt steers the run instead of starting another"
+        );
     }
 
     #[test]
@@ -1338,7 +1973,20 @@ mod tests {
         a.on_event(Ev::NeedInput);
         let actions = a.on_key(ctrl('c'));
         assert!(matches!(&actions[..], [Action::Answer(s)] if s == "n"));
+        assert!(
+            a.on_key(ctrl('c')).is_empty(),
+            "first idle press only arms quit"
+        );
         assert!(matches!(&a.on_key(ctrl('c'))[..], [Action::Quit]));
+    }
+
+    #[test]
+    fn idle_ctrl_c_clears_draft_before_arming_quit() {
+        let mut a = app();
+        type_str(&mut a, "half a thought");
+        assert!(a.on_key(ctrl('c')).is_empty());
+        assert!(a.input.is_empty());
+        assert!(!a.quit_armed);
     }
 
     #[test]
@@ -1468,11 +2116,9 @@ mod tests {
             .items
             .iter()
             .any(|i| matches!(i, Item::Error(e) if e.contains("stopped early"))));
-        assert!(a
-            .items
-            .contains(&Item::Note("Verification Summary: ok".into())));
+        assert!(a.items.contains(&Item::Note("ok".into())));
         assert!(a.items.contains(&Item::Note(
-            "3 steps · 10 in / 4 out tokens · 1 file(s) edited".into()
+            "3 steps · 10 in / 4 out tokens · 1 file edited".into()
         )));
     }
 
@@ -1594,7 +2240,10 @@ mod tests {
     #[test]
     fn connect_prefetch_caches_models_without_picker() {
         let mut a = app();
-        a.on_event(Ev::Provider("gemini · gemini-3-flash-preview".into()));
+        a.on_event(Ev::Provider(
+            "gemini · gemini-3-flash-preview".into(),
+            Some(1_000_000),
+        ));
         assert!(a.models.is_empty(), "provider switch clears catalog");
         a.on_event(Ev::Models(Ok(vec![
             "gemini-3-flash-preview".into(),
@@ -1602,10 +2251,6 @@ mod tests {
         ])));
         assert_eq!(a.models.len(), 2);
         assert!(a.modal.is_none());
-        assert!(a
-            .items
-            .iter()
-            .any(|i| matches!(i, Item::Info(s) if s.contains("2 models ready"))));
     }
 
     #[test]
@@ -1764,6 +2409,7 @@ mod tests {
             name: "t".into(),
             ok: true,
             preview: "ok".into(),
+            diff: None,
         }));
         a.on_event(Ev::Progress(ProgressEvent::Assistant { text: "b".into() }));
         assert_eq!(assistant_bubble_texts(&a.items), vec!["a", "b"]);
@@ -1858,6 +2504,7 @@ mod tests {
             name: "read_file".into(),
             ok: true,
             preview: "…".into(),
+            diff: None,
         }));
         assert_eq!(a.scroll, 25);
     }
@@ -1970,9 +2617,12 @@ mod tests {
         for _ in 0..clear_pos {
             a.on_key(key(KeyCode::Down));
         }
-        assert!(a.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(matches!(
+            &a.on_key(key(KeyCode::Enter))[..],
+            [Action::Send(Cmd::ClearHistory)]
+        ));
         assert!(a.modal.is_none());
-        assert!(a.items.is_empty());
+        assert!(matches!(&a.items[..], [Item::Note(_)]));
     }
 
     #[test]
@@ -2067,16 +2717,15 @@ mod tests {
     }
 
     #[test]
-    fn startup_note_shows_connect_not_init() {
+    fn startup_setup_hint_replaces_ready_message() {
         let a = App::new(
             Profile::Build,
             "nim · model".into(),
-            Some("No API key for nim. Run /connect (or: devcode auth login nim).".into()),
+            Some("No API key for nim. Run /connect or /provider.".into()),
         );
-        assert!(a.items.iter().any(|i| matches!(
-            i,
-            Item::Info(t) if t.contains("/connect") && !t.contains("/init")
-        )));
+        assert!(
+            matches!(a.items.as_slice(), [Item::Welcome, Item::Info(t)] if t.contains("/connect"))
+        );
     }
 
     #[test]
@@ -2124,5 +2773,322 @@ mod tests {
             .items
             .iter()
             .any(|i| matches!(i, Item::Info(t) if t.contains("cancelled"))));
+    }
+
+    #[test]
+    fn follow_up_typed_while_working_is_queued_and_sent_after_the_run() {
+        let mut a = app();
+        a.status = Status::Working { step: 1 };
+        type_str(&mut a, "can you close the server?");
+        assert!(matches!(
+            &a.on_key(key(KeyCode::Enter))[..],
+            [Action::Steer(_)]
+        ));
+        assert!(a.input.is_empty());
+        assert_eq!(a.queued, vec!["can you close the server?".to_string()]);
+        assert!(a.next_queued().is_none(), "nothing is sent while working");
+        type_str(&mut a, "and the port?");
+        a.on_key(key(KeyCode::Enter));
+        a.status = Status::Idle;
+        let sent = a.next_queued();
+        assert!(
+            matches!(&sent, Some(Cmd::Prompt(p)) if p == "can you close the server?\n\nand the port?")
+        );
+        assert!(a.queued.is_empty());
+        assert!(a.is_working());
+    }
+
+    #[test]
+    fn esc_on_empty_input_pulls_back_the_last_queued_message() {
+        let mut a = app();
+        a.status = Status::Working { step: 1 };
+        type_str(&mut a, "oops");
+        a.on_key(key(KeyCode::Enter));
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.input, "oops");
+        assert!(a.queued.is_empty());
+    }
+
+    #[test]
+    fn tool_timer_and_background_count_follow_events() {
+        let mut a = app();
+        a.on_event(Ev::Progress(ProgressEvent::ToolCall {
+            name: "start_process".into(),
+            summary: "npm run dev".into(),
+        }));
+        assert_eq!(
+            a.tool_since.as_ref().map(|(n, _)| n.as_str()),
+            Some("start_process")
+        );
+        a.on_event(Ev::Progress(ProgressEvent::ToolResult {
+            ok: true,
+            preview: "started proc-1".into(),
+            name: "start_process".into(),
+            diff: None,
+        }));
+        assert!(a.tool_since.is_none());
+        a.on_event(Ev::Processes(1));
+        assert_eq!(a.bg_processes, 1);
+    }
+
+    #[test]
+    fn ps_and_stop_work_while_a_run_is_going() {
+        let mut a = app();
+        a.status = Status::Working { step: 2 };
+        type_str(&mut a, "/ps");
+        assert!(matches!(
+            &a.on_key(key(KeyCode::Enter))[..],
+            [Action::Processes]
+        ));
+        type_str(&mut a, "/stop proc-1");
+        assert!(matches!(
+            &a.on_key(key(KeyCode::Enter))[..],
+            [Action::StopProcess(id)] if id == "proc-1"
+        ));
+    }
+
+    #[test]
+    fn paste_keeps_indentation_and_places_cursor_after_text() {
+        let mut a = app();
+        type_str(&mut a, "ab");
+        a.on_key(key(KeyCode::Left));
+        a.on_paste("fn x() {\r\n\treturn;\n}");
+        assert_eq!(a.input, "afn x() {\n\treturn;\n}b");
+        assert_eq!(a.cursor, a.input.chars().count() - 1);
+    }
+
+    #[test]
+    fn esc_clears_input_but_up_restores_it() {
+        let mut a = app();
+        type_str(&mut a, "long draft");
+        a.on_key(key(KeyCode::Esc));
+        assert!(a.input.is_empty());
+        a.on_key(key(KeyCode::Up));
+        assert_eq!(a.input, "long draft");
+    }
+
+    #[test]
+    fn late_reasoning_tail_updates_in_place_instead_of_duplicating() {
+        let mut a = app();
+        a.items.clear();
+        a.on_event(Ev::Progress(ProgressEvent::Thinking { step: 1 }));
+        a.on_event(Ev::Progress(ProgressEvent::Reasoning {
+            text: "plan the ans".into(),
+        }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "Hello wor".into(),
+        }));
+        // Redaction holds back the reasoning tail until the stream ends.
+        a.on_event(Ev::Progress(ProgressEvent::Reasoning {
+            text: "plan the answer".into(),
+        }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "Hello world".into(),
+        }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "Hello world".into(),
+        }));
+        assert_eq!(
+            a.items,
+            vec![
+                Item::Reasoning("plan the answer".into()),
+                Item::Assistant("Hello world".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_command_toggles_reasoning_visibility() {
+        let mut a = app();
+        assert!(!a.show_thinking);
+        type_str(&mut a, "/thinking");
+        a.on_key(key(KeyCode::Enter));
+        assert!(a.show_thinking);
+        type_str(&mut a, "/thinking");
+        a.on_key(key(KeyCode::Enter));
+        assert!(!a.show_thinking);
+    }
+
+    #[test]
+    fn approval_panel_arrows_pick_and_enter_confirms() {
+        let mut a = app();
+        a.on_event(Ev::PromptText(
+            "--- a/x\n+++ b/x\nApprove edit to 'x'? [y]es / [a]lways / [n]o: ".into(),
+        ));
+        a.on_event(Ev::NeedInput);
+        a.on_key(key(KeyCode::Down));
+        assert_eq!(a.approval_choice, 1);
+        assert!(matches!(&a.on_key(key(KeyCode::Enter))[..], [Action::Answer(s)] if s == "a"));
+        a.on_event(Ev::PromptText(
+            "Destructive command detected: 'npm run dev' (starts a managed long-running process). Approve? [y]es / [n]o: ".into(),
+        ));
+        a.on_event(Ev::NeedInput);
+        assert_eq!(
+            a.approval_choice, 0,
+            "each question starts on the first option"
+        );
+        assert!(matches!(&a.on_key(key(KeyCode::Char('2')))[..], [Action::Answer(s)] if s == "n"));
+    }
+
+    #[test]
+    fn approval_note_between_call_and_result_keeps_result_on_its_card() {
+        let mut a = app();
+        a.items.clear();
+        a.on_event(Ev::Progress(ProgressEvent::ToolCall {
+            name: "write_file".into(),
+            summary: "src/index.css".into(),
+        }));
+        a.items.push(Item::Info("edit approved".into()));
+        a.on_event(Ev::Progress(ProgressEvent::ToolResult {
+            name: "write_file".into(),
+            ok: true,
+            preview: "Updated src/index.css".into(),
+            diff: None,
+        }));
+        assert!(matches!(a.items[1], Item::ToolResult { .. }));
+        assert!(matches!(a.items[2], Item::Info(_)));
+    }
+
+    #[test]
+    fn retry_drops_the_failed_attempts_partial_text() {
+        let mut a = app();
+        a.items.clear();
+        a.on_event(Ev::Progress(ProgressEvent::Thinking { step: 1 }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "Half an ans".into(),
+        }));
+        a.on_event(Ev::Progress(ProgressEvent::Retry {
+            attempt: 1,
+            max: 3,
+            reason: "Connection reset by peer".into(),
+        }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "Full answer".into(),
+        }));
+        assert_eq!(
+            a.items,
+            vec![
+                Item::Info("connection lost; retrying (1/3)".into()),
+                Item::Assistant("Full answer".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn typing_slash_lists_matching_commands_live() {
+        let mut a = app();
+        type_str(&mut a, "/c");
+        let names: Vec<&str> = a.suggestions().iter().map(|(n, _)| *n).collect();
+        assert_eq!(&names[..3], ["/connect", "/connections", "/clear"]);
+        type_str(&mut a, "l");
+        assert_eq!(a.suggestions()[0].0, "/clear");
+        type_str(&mut a, " ");
+        assert!(a.suggestions().is_empty(), "an argument hides the list");
+    }
+
+    #[test]
+    fn suggestion_keys_pick_complete_and_run() {
+        let mut a = app();
+        type_str(&mut a, "/th");
+        assert!(matches!(&a.on_key(key(KeyCode::Enter))[..], []));
+        assert!(a.show_thinking, "Enter ran /thinking");
+        assert!(a.input.is_empty());
+        type_str(&mut a, "/s");
+        a.on_key(key(KeyCode::Down));
+        let second = a.suggestions()[1].0;
+        a.on_key(key(KeyCode::Tab));
+        assert!(a.input.starts_with(second));
+        a.input.clear();
+        a.cursor = 0;
+        type_str(&mut a, "/sto");
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            a.input, "/stop ",
+            "commands with an argument complete first"
+        );
+    }
+
+    #[test]
+    fn steered_message_moves_from_queue_into_transcript() {
+        let mut a = app();
+        a.status = Status::Working { step: 1 };
+        type_str(&mut a, "use port 3000");
+        a.on_key(key(KeyCode::Enter));
+        a.on_event(Ev::Progress(ProgressEvent::Steered {
+            text: "use port 3000".into(),
+        }));
+        assert!(a.queued.is_empty());
+        assert_eq!(a.items.last(), Some(&Item::User("use port 3000".into())));
+        type_str(&mut a, "oops");
+        a.on_key(key(KeyCode::Enter));
+        assert!(
+            matches!(&a.on_key(key(KeyCode::Esc))[..], [Action::Unsteer(t)] if t == "oops"),
+            "Esc takes an unread message back"
+        );
+        assert_eq!(a.input, "oops");
+    }
+
+    #[test]
+    fn context_left_follows_the_latest_request() {
+        let mut a = app();
+        a.context_window = Some(100_000);
+        assert_eq!(a.context_left(), None, "nothing sent yet");
+        a.on_event(Ev::Progress(ProgressEvent::Usage {
+            input: 30_000,
+            output: 500,
+        }));
+        assert_eq!(a.context_left(), Some(70));
+        // Usage is cumulative within a run; the second request sent 40k.
+        a.on_event(Ev::Progress(ProgressEvent::Usage {
+            input: 70_000,
+            output: 900,
+        }));
+        assert_eq!(a.context_left(), Some(60));
+        type_str(&mut a, "/clear");
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.context_left(), None);
+    }
+
+    #[test]
+    fn statusline_command_toggles_and_saves_items() {
+        let mut a = app();
+        assert!(a.statusline.iter().any(|s| s == "branch"));
+        type_str(&mut a, "/statusline branch");
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(!a.statusline.iter().any(|s| s == "branch"));
+        assert!(
+            matches!(&actions[..], [Action::Send(Cmd::SaveStatusline(items))] if !items.contains(&"branch".to_string()))
+        );
+        type_str(&mut a, "/statusline branch");
+        a.on_key(key(KeyCode::Enter));
+        let names: Vec<&str> = STATUSLINE_ITEMS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(a.statusline, names, "shown again in its default place");
+        type_str(&mut a, "/statusline nope");
+        assert!(a.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(matches!(a.items.last(), Some(Item::Error(e)) if e.contains("unknown item")));
+    }
+
+    #[test]
+    fn status_command_lists_session_details() {
+        let mut a = app();
+        a.context_window = Some(128_000);
+        type_str(&mut a, "/status");
+        a.on_key(key(KeyCode::Enter));
+        let text = format!("{:?}", a.items);
+        for part in [
+            "model",
+            "context     128.0k window",
+            "tokens",
+            "branch",
+            "folder",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+    }
+
+    #[test]
+    fn git_branch_reads_this_repository() {
+        // Tests run from the crate root, which is a git checkout.
+        assert!(git_branch().is_some_and(|b| !b.is_empty()));
     }
 }

@@ -27,6 +27,10 @@ pub enum Cmd {
     SetProvider(String),
     /// `None` clears the effort setting.
     SetEffort(Option<String>),
+    /// Forget the conversation (`/clear`).
+    ClearHistory,
+    /// Save the status line items (`/statusline`).
+    SaveStatusline(Vec<String>),
 }
 
 pub enum Ev {
@@ -38,11 +42,13 @@ pub enum Ev {
     Done(Box<LoopResult>),
     Failed(String),
     Info(Vec<String>),
-    /// Provider label after a connect, reload or switch.
-    Provider(String),
+    /// Provider label and context window after a connect, reload or switch.
+    Provider(String, Option<u64>),
     Models(Result<Vec<String>, String>),
     /// Effort values the current model accepts (empty: none).
     Efforts(Vec<String>),
+    /// Managed background processes still running.
+    Processes(usize),
 }
 
 pub struct ChannelWriter(pub Sender<Ev>);
@@ -119,6 +125,7 @@ pub fn spawn(
     std::thread::spawn(move || {
         while let Ok(cmd) = commands.recv() {
             handle(&mut session, &cli, cmd, &events);
+            let _ = events.send(Ev::Processes(session.running_processes()));
         }
     })
 }
@@ -129,7 +136,7 @@ fn switched(
     events: &Sender<Ev>,
 ) {
     let _ = events.send(match result {
-        Ok(_) => Ev::Provider(session.provider_label()),
+        Ok(_) => Ev::Provider(session.provider_label(), session.context_window()),
         Err(e) => Ev::Failed(e.to_string()),
     });
 }
@@ -138,6 +145,14 @@ fn switched(
 /// (same pattern as peer TUIs that populate a model picker on auth).
 fn prefetch_models(session: &Session, events: &Sender<Ev>) {
     let _ = events.send(Ev::Models(session.list_models().map_err(|e| e.to_string())));
+}
+
+fn prefetch_if_ready(session: &Session, events: &Sender<Ev>) {
+    if let Some(note) = session.startup_note() {
+        let _ = events.send(Ev::Info(vec![note]));
+    } else {
+        prefetch_models(session, events);
+    }
 }
 
 fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
@@ -154,12 +169,21 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
             let result = session.connect_with(name.as_deref(), true, move || Ok(key));
             match result {
                 Ok(()) => {
-                    let _ = events.send(Ev::Provider(session.provider_label()));
+                    let _ = events.send(Ev::Provider(
+                        session.provider_label(),
+                        session.context_window(),
+                    ));
                     prefetch_models(session, events);
                 }
                 Err(e) => {
                     let _ = events.send(Ev::Failed(e.to_string()));
                 }
+            }
+        }
+        Cmd::ClearHistory => session.clear_history(),
+        Cmd::SaveStatusline(items) => {
+            if let Err(e) = session.save_statusline(items) {
+                let _ = events.send(Ev::Failed(e.to_string()));
             }
         }
         Cmd::Connections => {
@@ -171,8 +195,11 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
         }
         Cmd::Reload => match session.reload(cli) {
             Ok(()) => {
-                let _ = events.send(Ev::Provider(session.provider_label()));
-                prefetch_models(session, events);
+                let _ = events.send(Ev::Provider(
+                    session.provider_label(),
+                    session.context_window(),
+                ));
+                prefetch_if_ready(session, events);
             }
             Err(e) => {
                 let _ = events.send(Ev::Failed(e.to_string()));
@@ -188,27 +215,18 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
             let result = session.set_model(&id);
             switched(session, result, events);
         }
-        Cmd::SetProvider(name) => {
-            match session.set_provider(&name) {
-                Ok(_) => {
-                    let _ = events.send(Ev::Provider(session.provider_label()));
-                    // A switch without a stored key works until the first request; say so now.
-                    let has_key = session.has_stored_key(&name);
-                    let env_set = crate::config::preset(&name).is_some_and(|p| {
-                        !p.api_key_env.is_empty() && std::env::var(p.api_key_env).is_ok()
-                    });
-                    if !has_key && !env_set {
-                        let _ = events.send(Ev::Info(vec![format!(
-                            "no stored key for {name}; run /connect {name}"
-                        )]));
-                    }
-                    prefetch_models(session, events);
-                }
-                Err(e) => {
-                    let _ = events.send(Ev::Failed(e.to_string()));
-                }
+        Cmd::SetProvider(name) => match session.set_provider(&name) {
+            Ok(_) => {
+                let _ = events.send(Ev::Provider(
+                    session.provider_label(),
+                    session.context_window(),
+                ));
+                prefetch_if_ready(session, events);
             }
-        }
+            Err(e) => {
+                let _ = events.send(Ev::Failed(e.to_string()));
+            }
+        },
         Cmd::SetEffort(level) => {
             let result = session.set_effort(level.as_deref());
             switched(session, result, events);

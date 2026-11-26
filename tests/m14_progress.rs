@@ -76,4 +76,9 @@ fn no_test_command_finishes_unverified_and_progress_is_reported() {
     assert!(events.iter().any(
         |e| matches!(e, ProgressEvent::ToolResult { name, ok: true, .. } if name == "write_file")
     ));
+    // The user sees the diff of the write; the model sees only "Updated a".
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProgressEvent::ToolResult { diff: Some(d), preview, .. } if d.contains("+x") && preview == "Updated a"
+    )));
 }

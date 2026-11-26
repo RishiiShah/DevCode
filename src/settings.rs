@@ -16,6 +16,9 @@ pub struct UserSettings {
     /// Selected credential key (`nim` or `nim:work`). Absent means the plain connector key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_slot: Option<String>,
+    /// Items on the TUI status line (`/statusline`). Absent means the default set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statusline: Option<Vec<String>>,
 }
 
 impl UserSettings {
@@ -137,6 +140,7 @@ mod tests {
                 provider: Some(nim),
                 default_provider: Some("gemini".into()),
                 active_slot: Some("nim:work".into()),
+                statusline: None,
             },
         )
         .unwrap();
