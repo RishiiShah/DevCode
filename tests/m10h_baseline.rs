@@ -80,7 +80,7 @@ fn edit_before_test_refused() {
         true,
     );
     assert!(!dir.path().join("a").exists());
-    assert!(res.messages.iter().any(|m|m.content=="Run the configured test command first: true. This records whether the problem reproduces."));
+    assert!(res.messages.iter().any(|m|m.content=="Run the configured test command first, exactly as written: true. A different or narrower command does not count. This records whether the problem reproduces."));
 }
 #[test]
 fn baseline_then_edit_succeeds() {
@@ -169,6 +169,6 @@ fn edit_file_before_test_is_refused() {
     assert!(!dir.path().join("a").exists());
     assert!(result.messages.iter().any(|m| m
         .content
-        .contains("Run the configured test command first: true.")));
+        .contains("Run the configured test command first, exactly as written: true.")));
     assert!(output.0.lock().unwrap().is_empty());
 }

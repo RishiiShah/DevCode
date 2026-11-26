@@ -735,7 +735,7 @@ fn run_loop(
                 )
             } else if let Some(cmd) = baseline_required {
                 tool_ok = false;
-                format!("Run the configured test command first: {}. This records whether the problem reproduces.", cmd)
+                format!("Run the configured test command first, exactly as written: {}. A different or narrower command does not count. This records whether the problem reproduces.", cmd)
             } else {
                 tools.take_diff();
                 let checkpoint_before = tools.checkpoint_cursor();
