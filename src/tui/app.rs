@@ -242,6 +242,8 @@ const HELP: &str = "Enter       send message or command (queued while a run work
 /status             model, context use, tokens, branch, folder
 /statusline [ITEM]  show or hide a status line item
 /clear              clear the screen and start a new conversation
+/compact            compact older tool outputs to free context
+/export PATH        save the conversation as markdown
 /resume [ID]        continue a saved conversation (devcode -c: latest)
 /exit               quit
 PgUp/PgDn           scroll transcript
@@ -418,6 +420,10 @@ impl App {
                 self.conversations = list;
             }
             Ev::Resumed(loaded) => self.on_resumed(&loaded),
+            Ev::Compacted(msg) => {
+                self.context_used = 0;
+                self.items.push(Item::Note(msg));
+            }
         }
     }
 
@@ -1717,6 +1723,28 @@ impl App {
                 ));
                 vec![Action::Send(Cmd::ClearHistory)]
             }
+            "compact" => {
+                if busy {
+                    return busy_block(&mut self.items);
+                }
+                vec![Action::Send(Cmd::Compact)]
+            }
+            "export" => {
+                if busy {
+                    return busy_block(&mut self.items);
+                }
+                let path = rest
+                    .strip_prefix("export")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                match path {
+                    Some(p) => vec![Action::Send(Cmd::Export(p.to_string()))],
+                    None => {
+                        self.items.push(Item::Info("usage: /export PATH".into()));
+                        Vec::new()
+                    }
+                }
+            }
             "resume" | "continue" => {
                 if busy {
                     return busy_block(&mut self.items);
@@ -1843,6 +1871,8 @@ pub fn command_about(name: &str) -> &'static str {
         "/status" => "model, context, tokens, branch and folder",
         "/statusline" => "choose what the status line shows",
         "/clear" => "start a new conversation",
+        "/compact" => "compact older tool outputs to free context",
+        "/export" => "export the conversation as markdown",
         "/resume" => "continue a saved conversation",
         "/help" => "keys and commands",
         "/exit" => "quit",
@@ -1852,7 +1882,10 @@ pub fn command_about(name: &str) -> &'static str {
 
 /// Commands that read an argument; completing them leaves room to type it.
 fn takes_argument(name: &str) -> bool {
-    matches!(name, "/stop" | "/rollback" | "/init" | "/statusline")
+    matches!(
+        name,
+        "/stop" | "/rollback" | "/init" | "/statusline" | "/export"
+    )
 }
 
 pub fn slash_command_items() -> &'static [&'static str] {
@@ -1873,6 +1906,8 @@ pub fn slash_command_items() -> &'static [&'static str] {
         "/status",
         "/statusline",
         "/clear",
+        "/compact",
+        "/export",
         "/resume",
         "/help",
         "/exit",
@@ -3463,6 +3498,41 @@ mod tests {
         assert!(matches!(
             &actions[..],
             [Action::Send(Cmd::SetModel(id))] if id == "openai/tts-1"
+        ));
+    }
+
+    #[test]
+    fn compact_and_export_slash_commands_dispatch_and_handle_events() {
+        let mut a = app();
+        a.context_used = 5_000;
+        type_str(&mut a, "/compact");
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(&actions[..], [Action::Send(Cmd::Compact)]));
+        a.on_event(Ev::Compacted(
+            "Compacted conversation (8 -> 3 messages).".into(),
+        ));
+        assert_eq!(a.context_used, 0);
+        assert!(matches!(
+            a.items.last(),
+            Some(Item::Note(t)) if t.contains("Compacted conversation")
+        ));
+
+        a.input.clear();
+        a.cursor = 0;
+        type_str(&mut a, "/export");
+        assert!(a.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(matches!(
+            a.items.last(),
+            Some(Item::Info(t)) if t.contains("usage: /export PATH")
+        ));
+
+        a.input.clear();
+        a.cursor = 0;
+        type_str(&mut a, "/export docs/chat log.md");
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &actions[..],
+            [Action::Send(Cmd::Export(p))] if p == "docs/chat log.md"
         ));
     }
 }

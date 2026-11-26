@@ -217,6 +217,165 @@ impl Session {
         self.context_used = 0;
     }
 
+    /// Deterministically compacts the active conversation history (`/compact`) without an LLM call.
+    pub fn compact(&mut self) -> Result<String, DevCodeError> {
+        if self.history.is_empty() {
+            return Ok("nothing to compact yet".into());
+        }
+        let before = self.history.len();
+        let state = agent::session::session_state(&self.tools)
+            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        let diff = state
+            .changes
+            .iter()
+            .map(|(path, old, new)| approval::format_diff(old, new, &path.to_string_lossy()))
+            .collect::<String>();
+        let window = self
+            .context_window()
+            .unwrap_or(config::DEFAULT_CONTEXT_WINDOW);
+        let ctx = discipline::CompactionContext {
+            context_window: window,
+            active_manifest: state.manifest.as_ref(),
+            current_diff: &diff,
+            config: &self.config,
+            tool_log: &state.log,
+        };
+        self.history = discipline::compact_messages(&self.history, &ctx);
+        self.context_used = 0;
+        let _ = conversation::save_with_meta(
+            &self.root,
+            &self.conversation,
+            &self.title,
+            &self.history,
+            &self.tool_outcomes,
+            conversation::ConversationUsage {
+                total_in: self.total_in,
+                total_out: self.total_out,
+                context_used: self.context_used,
+            },
+        );
+        Ok(format!(
+            "Compacted conversation ({before} -> {} messages).",
+            self.history.len()
+        ))
+    }
+
+    /// Formats the active conversation as Markdown (`/export`).
+    pub fn format_markdown(&self) -> String {
+        use std::collections::{HashMap, HashSet};
+        use std::fmt::Write as _;
+
+        let mut out = String::new();
+        let heading = if self.title.trim().is_empty() {
+            "Conversation"
+        } else {
+            self.title.trim()
+        };
+        let _ = writeln!(out, "# {heading}\n");
+        let _ = writeln!(out, "- **Model**: {}", self.provider_label());
+        if self.total_in > 0 || self.total_out > 0 {
+            let _ = writeln!(
+                out,
+                "- **Tokens**: {} in / {} out",
+                self.total_in, self.total_out
+            );
+        }
+
+        let tool_results: HashMap<&str, &agent::Message> = self
+            .history
+            .iter()
+            .filter_map(|m| m.tool_call_id.as_deref().map(|id| (id, m)))
+            .collect();
+        let mut consumed: HashSet<&str> = HashSet::new();
+
+        for msg in &self.history {
+            match msg.role {
+                agent::Role::User if msg.tool_call_id.is_none() => {
+                    let _ = writeln!(out, "\n## User\n\n{}", msg.content.trim_end());
+                }
+                agent::Role::Assistant => {
+                    let _ = writeln!(out, "\n## Assistant");
+                    if !msg.content.trim().is_empty() {
+                        let _ = writeln!(out, "\n{}", msg.content.trim_end());
+                    }
+                    for call in &msg.tool_calls {
+                        let summary = agent::loop_runner::call_summary(&call.arguments);
+                        let outcome = self.tool_outcomes.get(&call.id);
+                        let status = outcome.map(|o| if o.ok { "ok" } else { "error" });
+                        let status_suffix = status.map(|s| format!(" ({s})")).unwrap_or_default();
+                        let _ = writeln!(
+                            out,
+                            "\n- **Tool `{}`**: `{}`{status_suffix}",
+                            call.name, summary
+                        );
+                        if let Some(diff) = outcome.and_then(|o| o.diff.as_deref()) {
+                            if !diff.trim().is_empty() {
+                                let _ = writeln!(out, "\n```diff\n{}\n```", diff.trim_end());
+                            }
+                        }
+                        if let Some(res) = tool_results.get(call.id.as_str()) {
+                            consumed.insert(call.id.as_str());
+                            let preview = agent::preview_lines(&res.content);
+                            if !preview.trim().is_empty()
+                                && outcome.and_then(|o| o.diff.as_ref()).is_none()
+                            {
+                                let _ = writeln!(out, "\n```text\n{}\n```", preview.trim_end());
+                            }
+                        }
+                    }
+                }
+                agent::Role::Tool | agent::Role::User => {
+                    if msg
+                        .tool_call_id
+                        .as_deref()
+                        .is_some_and(|id| consumed.contains(id))
+                    {
+                        continue;
+                    }
+                    if !msg.content.trim().is_empty() {
+                        let _ = writeln!(
+                            out,
+                            "\n## Tool Output\n\n```text\n{}\n```",
+                            msg.content.trim_end()
+                        );
+                    }
+                }
+                agent::Role::System => {}
+            }
+        }
+        out
+    }
+
+    /// Exports the active conversation as Markdown to `path` (`/export PATH`).
+    pub fn export_markdown(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, DevCodeError> {
+        if self.history.is_empty() {
+            return Err(DevCodeError::Config("nothing to export yet".into()));
+        }
+        let raw = path.to_string_lossy();
+        let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+            match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+                Some(home) => std::path::PathBuf::from(home).join(rest),
+                None => path.to_path_buf(),
+            }
+        } else {
+            path.to_path_buf()
+        };
+        let dest = if expanded.is_absolute() {
+            expanded
+        } else {
+            self.root.join(expanded)
+        };
+        if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| DevCodeError::Config(e.to_string()))?;
+        }
+        std::fs::write(&dest, self.format_markdown())
+            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        Ok(dest)
+    }
+
     /// Saved conversations for this project, newest first.
     pub fn conversations(&self) -> Vec<conversation::Summary> {
         conversation::list(&self.root)

@@ -192,3 +192,91 @@ fn resume_round_trips_edit_diff_ok_flag_and_tokens_and_loads_legacy_json() {
         (0, 0, 0)
     );
 }
+
+#[test]
+fn session_compact_and_export_markdown() {
+    use devcode::agent::ToolCall;
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "one\n").unwrap();
+
+    let model = ScriptedModel::new(vec![
+        Ok(Response {
+            text: None,
+            tool_calls: vec![
+                ToolCall {
+                    id: "t1".into(),
+                    thought_signature: None,
+                    name: "declare_scope".into(),
+                    arguments: json!({"files": ["note.txt"], "reason": "update"}).to_string(),
+                },
+                ToolCall {
+                    id: "t2".into(),
+                    thought_signature: None,
+                    name: "edit_file".into(),
+                    arguments: json!({
+                        "path": "note.txt",
+                        "old_string": "one",
+                        "new_string": "two"
+                    })
+                    .to_string(),
+                },
+            ],
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+            },
+        }),
+        Ok(Response {
+            text: Some("updated note".into()),
+            tool_calls: Vec::new(),
+            usage: Usage {
+                input_tokens: 120,
+                output_tokens: 10,
+            },
+        }),
+        Ok(Response {
+            text: Some("second answer".into()),
+            tool_calls: Vec::new(),
+            usage: Usage {
+                input_tokens: 140,
+                output_tokens: 12,
+            },
+        }),
+    ]);
+
+    let mut s = Session::new(
+        dir.path().to_path_buf(),
+        Config::default(),
+        Profile::Build,
+        Box::new(model),
+        devcode::tools::registry(dir.path().to_path_buf(), true),
+    );
+
+    assert!(s.export_markdown(std::path::Path::new("empty.md")).is_err());
+    assert_eq!(s.compact().unwrap(), "nothing to compact yet");
+
+    s.prompt("first turn").unwrap();
+    s.prompt("second turn").unwrap();
+
+    let exported = s
+        .export_markdown(std::path::Path::new("out/transcript.md"))
+        .unwrap();
+    let md = std::fs::read_to_string(&exported).unwrap();
+    assert!(md.contains("# first turn"));
+    assert!(md.contains("## User"));
+    assert!(md.contains("## Assistant"));
+    assert!(md.contains("Tool `edit_file`"));
+    assert!(md.contains("```diff"));
+    assert!(md.contains("-one") && md.contains("+two"));
+    assert!(md.contains("second answer"));
+
+    let summary = s.compact().unwrap();
+    assert!(summary.contains("Compacted conversation"), "{summary}");
+    let summary_id = devcode::conversation::list(dir.path())[0].id.clone();
+    let reloaded = devcode::conversation::load_full(dir.path(), &summary_id).unwrap();
+    assert!(reloaded.messages.iter().any(|m| m
+        .content
+        .contains("HARNESS DETERMINISTIC COMPACTION SUMMARY")));
+}

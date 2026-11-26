@@ -101,6 +101,29 @@ fn handle_plain_slash(line: &str, session: &mut devcode::Session) -> bool {
             }
             true
         }
+        "/compact" if words.next().is_none() => {
+            match session.compact() {
+                Ok(msg) => println!("{msg}"),
+                Err(e) => eprintln!("{e}"),
+            }
+            true
+        }
+        "/export" => {
+            let path = line
+                .trim()
+                .strip_prefix("/export")
+                .map(str::trim)
+                .unwrap_or("");
+            if path.is_empty() {
+                eprintln!("usage: /export PATH");
+            } else {
+                match session.export_markdown(std::path::Path::new(path)) {
+                    Ok(dest) => println!("exported conversation to {}", dest.display()),
+                    Err(e) => eprintln!("{e}"),
+                }
+            }
+            true
+        }
         _ => false,
     }
 }

@@ -29,6 +29,10 @@ pub enum Cmd {
     SetEffort(Option<String>),
     /// Forget the conversation (`/clear`).
     ClearHistory,
+    /// Compact the active conversation history (`/compact`).
+    Compact,
+    /// Export the active conversation as Markdown (`/export PATH`).
+    Export(String),
     /// Save the status line items (`/statusline`).
     SaveStatusline(Vec<String>),
     /// Saved conversations for `/resume`.
@@ -59,6 +63,8 @@ pub enum Ev {
     Conversations(Vec<(String, String)>),
     /// A saved conversation was loaded; its messages and tool outcomes rebuild the transcript.
     Resumed(Box<crate::conversation::LoadedConversation>),
+    /// Conversation history was compacted (`/compact`).
+    Compacted(String),
 }
 
 pub struct ChannelWriter(pub Sender<Ev>);
@@ -198,6 +204,18 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
             }
         }
         Cmd::ClearHistory => session.clear_history(),
+        Cmd::Compact => {
+            let _ = events.send(match session.compact() {
+                Ok(msg) => Ev::Compacted(msg),
+                Err(e) => Ev::Failed(e.to_string()),
+            });
+        }
+        Cmd::Export(path) => {
+            let _ = events.send(match session.export_markdown(std::path::Path::new(&path)) {
+                Ok(dest) => Ev::Info(vec![format!("exported conversation to {}", dest.display())]),
+                Err(e) => Ev::Failed(e.to_string()),
+            });
+        }
         Cmd::ListConversations => {
             let list = session
                 .conversations()
