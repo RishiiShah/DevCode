@@ -21,6 +21,30 @@ impl InputEstimate {
             .saturating_add(self.command_output)
     }
 
+    /// File and search results ingested since the last assistant message (NFR-4 is per turn).
+    pub(crate) fn latest_file_reads(request: &Request) -> u64 {
+        let mut tool_names = BTreeMap::new();
+        let mut latest = 0u64;
+        for message in &request.messages {
+            if message.role == Role::Assistant {
+                latest = 0;
+            }
+            for call in &message.tool_calls {
+                tool_names.insert(call.id.as_str(), call.name.as_str());
+            }
+            let is_read = message
+                .tool_call_id
+                .as_deref()
+                .and_then(|id| tool_names.get(id))
+                .is_some_and(|name| matches!(*name, "read_file" | "glob" | "grep"));
+            if message.role == Role::Tool && is_read {
+                let bytes = serde_json::to_vec(message).map_or(0, |data| data.len());
+                latest += bytes.div_ceil(4) as u64;
+            }
+        }
+        latest
+    }
+
     pub(crate) fn for_request(request: &Request) -> Self {
         let estimate = |bytes: usize| bytes.div_ceil(4) as u64;
         let mut result = Self {

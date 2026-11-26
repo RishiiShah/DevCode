@@ -352,7 +352,7 @@ fn run_loop(
         if calibration.conservative(estimated.system_prompt) > 2_500 {
             break ExitReason::SystemPromptBudgetExceeded;
         }
-        if calibration.conservative(estimated.file_reads) > 6_000 {
+        if calibration.conservative(InputEstimate::latest_file_reads(&req)) > 6_000 {
             break ExitReason::ToolContextBudgetExceeded;
         }
         tool_protocol::prepare(&mut req, tool_mode);

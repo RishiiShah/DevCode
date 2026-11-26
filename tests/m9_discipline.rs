@@ -487,6 +487,44 @@ fn refuses_oversized_file_context_before_model_call() {
 }
 
 #[test]
+fn file_context_budget_applies_to_the_latest_turn_not_the_whole_history() {
+    let round = |id: &str| {
+        vec![
+            Message::assistant(
+                "",
+                vec![ToolCall {
+                    id: id.into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                    thought_signature: None,
+                }],
+            ),
+            Message::tool("x".repeat(16_000), id),
+        ]
+    };
+    let mut history = round("read-1");
+    history.extend(round("read-2"));
+    let limits = LoopLimits {
+        history,
+        ..Default::default()
+    };
+    let model = ScriptedModel::new(vec![Ok(Response {
+        text: Some("done".into()),
+        tool_calls: vec![],
+        usage: Usage::default(),
+    })]);
+    let result = run_agent_loop(
+        Profile::Ask,
+        &model,
+        &ToolRegistry::new(),
+        "explain",
+        &limits,
+    )
+    .unwrap();
+    assert_ne!(result.exit_reason, ExitReason::ToolContextBudgetExceeded);
+}
+
+#[test]
 fn task_token_cap_checks_spend_and_stops_before_another_request() {
     let dir = tempfile::tempdir().unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
