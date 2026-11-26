@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod code_assist;
+pub(crate) mod egress;
 pub mod loop_runner;
 pub mod model;
 pub mod openai_compat;
@@ -19,3 +20,5 @@ pub use model::{
 };
 pub use scripted::ScriptedModel;
 pub use tool::{Tool, ToolRegistry};
+
+pub mod tool_protocol;

@@ -419,3 +419,28 @@ fn failed_model_call_keeps_reported_zero_and_missing_usage() {
     assert!(status.contains("0 input, missing output"), "{status}");
     assert!(status.contains("cache hit rate missing"), "{status}");
 }
+
+#[test]
+fn private_policy_rejects_history_saved_without_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut previous = session(dir.path(), vec![reply("prior data")]);
+    previous.prompt("first task").unwrap();
+
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "private_paths": ["local/private.txt"]
+    }))
+    .unwrap();
+    let mut protected = Session::new(
+        dir.path().to_path_buf(),
+        config,
+        Profile::Ask,
+        Box::new(ScriptedModel::new(vec![reply("protected reply")])),
+        devcode::tools::registry(dir.path().to_path_buf(), false),
+    );
+    assert!(protected.resume_full("").is_err());
+    protected.prompt("new task").unwrap();
+    assert!(protected.outbound_preview().unwrap().contains("new task"));
+    assert!(!protected.outbound_preview().unwrap().contains("prior data"));
+    protected.resume_full("").unwrap();
+    assert!(protected.outbound_preview().is_none());
+}

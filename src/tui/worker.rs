@@ -18,6 +18,7 @@ pub enum Cmd {
         key: String,
     },
     Connections,
+    Egress,
     Rollback(Option<usize>),
     /// Re-read `.devcode.json` (after `/init` wrote it).
     Reload,
@@ -259,6 +260,12 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
             if let Err(e) = session.save_statusline(items) {
                 let _ = events.send(Ev::Failed(e.to_string()));
             }
+        }
+        Cmd::Egress => {
+            let value = session
+                .outbound_preview()
+                .unwrap_or_else(|| "no model request sent in this session".into());
+            let _ = events.send(Ev::Info(value.lines().map(str::to_owned).collect()));
         }
         Cmd::Connections => {
             let _ = events.send(match session.connections() {

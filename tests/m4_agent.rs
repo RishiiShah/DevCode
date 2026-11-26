@@ -179,6 +179,8 @@ fn test_step_limit_ends_run_with_matching_reason() {
         steer: None,
         token_ledger: None,
         calibration: Default::default(),
+        tool_mode: Default::default(),
+        outbound_preview: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -222,6 +224,8 @@ fn test_wall_time_limit_ends_run_with_matching_reason() {
         steer: None,
         token_ledger: None,
         calibration: Default::default(),
+        tool_mode: Default::default(),
+        outbound_preview: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -253,6 +257,8 @@ fn test_consecutive_format_errors_limit_ends_run() {
         steer: None,
         token_ledger: None,
         calibration: Default::default(),
+        tool_mode: Default::default(),
+        outbound_preview: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();

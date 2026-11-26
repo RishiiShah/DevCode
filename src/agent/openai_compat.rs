@@ -130,7 +130,11 @@ impl OpenAiCompat {
             v
         }));
         let tools: Vec<_> = req.tools.iter().map(|t| json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.parameters}})).collect();
-        let mut body = json!({"model":self.config.model,"messages":messages,"tools":tools,"tool_choice":"auto","stream":false});
+        let mut body = json!({"model":self.config.model,"messages":messages,"stream":false});
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+            body["tool_choice"] = json!("auto");
+        }
         if let Some(object) = body.as_object_mut() {
             object.extend(self.config.extra_body.clone());
         }

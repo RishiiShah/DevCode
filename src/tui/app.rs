@@ -256,6 +256,7 @@ const HELP: &str = "Enter       send message or command (queued while a run work
 /thinking           show or hide model thinking (hidden by default)
 /ps                 list background processes (dev servers)
 /stop ID            stop a background process
+/egress             show last outbound model request
 /status             model, context use, tokens, branch, folder
 /statusline [ITEM]  show or hide a status line item
 /clear              clear the screen and start a new conversation
@@ -1748,6 +1749,7 @@ impl App {
                 Vec::new()
             }
             "connections" => vec![Action::Send(Cmd::Connections)],
+            "egress" => vec![Action::Send(Cmd::Egress)],
             "model" | "provider" | "effort" => {
                 if busy {
                     return busy_block(&mut self.items);
@@ -1930,6 +1932,7 @@ pub fn command_about(name: &str) -> &'static str {
         "/ps" => "list background processes",
         "/stop" => "stop a background process",
         "/status" => "model, context, tokens, branch and folder",
+        "/egress" => "show the last outbound model request",
         "/statusline" => "choose what the status line shows",
         "/clear" => "start a new conversation",
         "/compact" => "compact older tool outputs to free context",
@@ -1965,6 +1968,7 @@ pub fn slash_command_items() -> &'static [&'static str] {
         "/ps",
         "/stop",
         "/status",
+        "/egress",
         "/statusline",
         "/clear",
         "/compact",
@@ -2534,6 +2538,7 @@ mod tests {
                 tool_outcomes: Default::default(),
                 token_ledger: Vec::new(),
                 scope: None,
+                private_policy: None,
                 total_in: 420,
                 total_out: 80,
                 context_used: 300,

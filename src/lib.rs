@@ -71,6 +71,7 @@ pub struct Session {
     /// Persisted per-tool outcomes (`ok`, optional `diff`) and usage for resume fidelity.
     tool_outcomes: std::collections::BTreeMap<String, agent::ToolOutcome>,
     token_ledger: Vec<agent::token_ledger::LedgerEntry>,
+    outbound_preview: std::sync::Arc<std::sync::Mutex<Option<agent::Request>>>,
     total_in: u64,
     total_out: u64,
     context_used: u64,
@@ -80,6 +81,7 @@ pub struct Session {
         std::collections::BTreeMap<(String, String), capabilities::ModelCapabilities>,
     >,
     stream_usage_downgrades: std::collections::BTreeSet<(String, String)>,
+    tool_downgrades: std::collections::BTreeMap<(String, String), agent::tool_protocol::ToolMode>,
 }
 
 /// A turn cut short (cancel, step limit) can end on tool calls without results, which providers
@@ -141,12 +143,14 @@ impl Session {
             title: String::new(),
             tool_outcomes: Default::default(),
             token_ledger: Vec::new(),
+            outbound_preview: Default::default(),
             total_in: 0,
             total_out: 0,
             context_used: 0,
             config_context_window,
             catalog: Default::default(),
             stream_usage_downgrades: Default::default(),
+            tool_downgrades: Default::default(),
         }
     }
     fn model_key(provider: &config::ProviderConfig) -> (String, String) {
@@ -180,17 +184,25 @@ impl Session {
             (window, config::ContextWindowSource::Config) => Some(window),
             _ => None,
         };
-        Some(capabilities::resolve(
+        let mut record = capabilities::resolve(
             provider,
             configured,
             catalog.get(&key).unwrap_or(&empty),
             legacy_window,
             self.stream_usage_downgrades.contains(&key),
-        ))
+        );
+        if self.tool_downgrades.get(&key) == Some(&agent::tool_protocol::ToolMode::Text) {
+            record.values.native_tools = Some(false);
+            record.values.parallel_tools = Some(false);
+            record.sources.insert("native_tools", "runtime downgrade");
+            record.sources.insert("parallel_tools", "runtime downgrade");
+        }
+        Some(record)
     }
 
     /// Runs one user turn on top of the conversation so far and records the turn in it.
     pub fn prompt(&mut self, prompt: &str) -> Result<agent::LoopResult, DevCodeError> {
+        self.clear_outbound_preview();
         let capabilities = self.model_capabilities();
         if let Some(record) = &capabilities {
             self.model
@@ -212,6 +224,21 @@ impl Session {
             }
         }
         let token_ledger = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool_mode = self
+            .config
+            .provider
+            .as_ref()
+            .and_then(|p| self.tool_downgrades.get(&Self::model_key(p)).copied())
+            .unwrap_or_else(|| {
+                if capabilities
+                    .as_ref()
+                    .is_some_and(|record| record.values.native_tools == Some(false))
+                {
+                    agent::tool_protocol::ToolMode::Text
+                } else {
+                    agent::tool_protocol::ToolMode::Native
+                }
+            });
         let limits = agent::LoopLimits {
             history: self.history.clone(),
             context_window: self.context_window(),
@@ -225,6 +252,8 @@ impl Session {
             steer: Some(self.steer.clone()),
             token_ledger: Some(token_ledger.clone()),
             calibration,
+            tool_mode,
+            outbound_preview: Some(self.outbound_preview.clone()),
             ..Default::default()
         };
         let result = agent::run_agent_with_config(
@@ -254,6 +283,14 @@ impl Session {
                 }
                 if let Some(output) = row.reported.output_tokens {
                     self.total_out = self.total_out.saturating_add(output);
+                }
+            }
+            if let Some(provider) = &self.config.provider {
+                for event in rows.iter().flat_map(|row| &row.events) {
+                    if let agent::token_ledger::LedgerEvent::ToolDowngrade { mode } = event {
+                        self.tool_downgrades
+                            .insert(Self::model_key(provider), *mode);
+                    }
                 }
             }
             self.token_ledger.append(&mut rows);
@@ -298,6 +335,7 @@ impl Session {
                 total_out: self.total_out,
                 context_used: self.context_used,
                 token_ledger: self.token_ledger.clone(),
+                private_policy: agent::egress::fingerprint(&self.config.private_paths),
             },
             self.tools.scope_snapshot(),
         );
@@ -305,6 +343,7 @@ impl Session {
 
     /// Forgets the conversation (`/clear`); the next prompt starts a new saved one.
     pub fn clear_history(&mut self) {
+        self.clear_outbound_preview();
         self.history.clear();
         self.conversation = conversation::new_id();
         self.title.clear();
@@ -504,6 +543,13 @@ impl Session {
         };
         let mut loaded = conversation::load_full(&self.root, &id)
             .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        let private_policy = agent::egress::fingerprint(&self.config.private_paths);
+        if private_policy.is_some() && private_policy != loaded.private_policy {
+            return Err(DevCodeError::Config(
+                "conversation was saved under a different private-path policy".into(),
+            ));
+        }
+        self.clear_outbound_preview();
         close_dangling_tool_calls(&mut loaded.messages);
         self.history = loaded.messages.clone();
         self.conversation = loaded.id.clone();
@@ -524,6 +570,16 @@ impl Session {
     /// Re-reads `.devcode.json` and rebuilds the model; keeps tools and approval state.
     pub fn reload(&mut self, cli: &Cli) -> Result<(), DevCodeError> {
         let (config, model) = load_provider(&self.root, cli)?;
+        if !self.history.is_empty()
+            && !config.private_paths.is_empty()
+            && agent::egress::fingerprint(&config.private_paths)
+                != agent::egress::fingerprint(&self.config.private_paths)
+        {
+            return Err(DevCodeError::Config(
+                "start a new conversation before changing private paths".into(),
+            ));
+        }
+        self.clear_outbound_preview();
         self.config_context_window = explicit_config_window(&config);
         self.config = config;
         self.model = model;
@@ -589,6 +645,17 @@ impl Session {
             .copied()
     }
 
+    pub fn outbound_preview(&self) -> Option<String> {
+        let preview = self.outbound_preview.lock().ok()?;
+        serde_json::to_string_pretty(preview.as_ref()?).ok()
+    }
+
+    fn clear_outbound_preview(&self) {
+        if let Ok(mut preview) = self.outbound_preview.lock() {
+            *preview = None;
+        }
+    }
+
     pub fn token_status(&self) -> Option<String> {
         agent::token_ledger::summary(&self.token_ledger)
     }
@@ -596,17 +663,24 @@ impl Session {
     pub fn capability_status(&self) -> Option<String> {
         let record = self.model_capabilities()?;
         let fields = serde_json::to_value(record.values).ok()?;
-        Some(
-            record
-                .sources
-                .into_iter()
-                .filter_map(|(name, source)| {
-                    let value = fields.get(name).filter(|value| !value.is_null())?;
-                    Some(format!("{name} {value} ({source})"))
-                })
-                .collect::<Vec<_>>()
-                .join(" · "),
-        )
+        let mut status = record
+            .sources
+            .into_iter()
+            .filter_map(|(name, source)| {
+                let value = fields.get(name).filter(|value| !value.is_null())?;
+                Some(format!("{name} {value} ({source})"))
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if let Some(mode) = self
+            .config
+            .provider
+            .as_ref()
+            .and_then(|provider| self.tool_downgrades.get(&Self::model_key(provider)))
+        {
+            status.push_str(&format!(" · tools {} (runtime downgrade)", mode.as_str()));
+        }
+        Some(status)
     }
 
     /// Status line items saved by `/statusline`, if any.

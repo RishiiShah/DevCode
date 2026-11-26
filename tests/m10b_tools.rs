@@ -207,3 +207,178 @@ fn invalid_arguments_are_errors() {
         assert!(call(&tools, name, json!({})).is_err());
     }
 }
+
+#[test]
+fn repeated_malformed_calls_fall_back_to_text_without_bypassing_permissions() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("a"), "readable marker\n").unwrap();
+    let tools = registry(dir.path(), true);
+    let model = ScriptedModel::new(vec![
+        Err(devcode::agent::ModelError::FormatError(
+            "invalid tool arguments JSON".into(),
+        )),
+        Err(devcode::agent::ModelError::FormatError(
+            "invalid tool arguments JSON".into(),
+        )),
+        Ok(Response {
+            text: Some(r#"{"devcode_tool_calls":[{"name":"write_file","arguments":{"path":"a","content":"replaced"}}]}"#.into()),
+            tool_calls: vec![],
+            usage: Usage::default(),
+        }),
+        Ok(Response {
+            text: Some(
+                r#"{"devcode_tool_calls":[{"name":"read_file","arguments":{"path":"a"}}]}"#.into(),
+            ),
+            tool_calls: vec![],
+            usage: Usage::default(),
+        }),
+        Ok(Response {
+            text: Some("done".into()),
+            tool_calls: vec![],
+            usage: Usage::default(),
+        }),
+    ]);
+    let result = run_agent_loop(
+        Profile::Ask,
+        &model,
+        &tools,
+        "read a",
+        &LoopLimits::default(),
+    )
+    .unwrap();
+    assert!(result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("readable marker")));
+    assert_eq!(result.token_ledger.len(), 5);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("a")).unwrap(),
+        "readable marker\n"
+    );
+    assert!(!result.token_ledger[2].completed);
+}
+
+#[test]
+fn private_reads_never_enter_model_history() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("a"), "private marker\n").unwrap();
+    fs::write(dir.path().join("b"), "public marker\n").unwrap();
+    std::os::unix::fs::symlink("a", dir.path().join("alias")).unwrap();
+    let tools = registry(dir.path(), true);
+    let config: devcode::Config = serde_json::from_value(json!({"private_paths": ["a"]})).unwrap();
+    let model = ScriptedModel::new(vec![
+        Ok(Response {
+            text: None,
+            tool_calls: ["a", "alias", "b"]
+                .into_iter()
+                .map(|path| ToolCall {
+                    id: path.into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path":path}).to_string(),
+                    thought_signature: None,
+                })
+                .collect(),
+            usage: Usage::default(),
+        }),
+        Ok(Response {
+            text: Some("done".into()),
+            tool_calls: vec![],
+            usage: Usage::default(),
+        }),
+    ]);
+    let result = devcode::agent::run_agent_with_config(
+        Profile::Ask,
+        &model,
+        &tools,
+        "read a and b",
+        &LoopLimits::default(),
+        dir.path(),
+        &config,
+    )
+    .unwrap();
+    assert!(!result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("private marker")));
+    assert!(result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("public marker")));
+    assert!(!result.tool_outcomes["a"].ok);
+    assert!(!result.tool_outcomes["alias"].ok);
+}
+
+#[test]
+fn schema_rejection_uses_simpler_native_tools_on_the_next_attempt() {
+    let dir = TempDir::new().unwrap();
+    let tools = registry(dir.path(), true);
+    let model = ScriptedModel::new(vec![
+        Err(devcode::agent::ModelError::Network(
+            r#"HTTP 400: {"error":{"param":"tools[0].function.parameters","message":"unsupported"}}"#.into(),
+        )),
+        Ok(Response { text: Some("done".into()), tool_calls: vec![], usage: Usage::default() }),
+    ]);
+    let preview = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let limits = LoopLimits {
+        outbound_preview: Some(preview.clone()),
+        ..Default::default()
+    };
+    let result = run_agent_loop(Profile::Ask, &model, &tools, "explain", &limits).unwrap();
+    assert_eq!(result.exit_reason, devcode::agent::ExitReason::Completed);
+    assert_eq!(result.token_ledger.len(), 2);
+    assert!(matches!(
+        result.token_ledger[0].events[0],
+        devcode::agent::token_ledger::LedgerEvent::ToolDowngrade {
+            mode: devcode::agent::tool_protocol::ToolMode::Simplified
+        }
+    ));
+    let preview = preview.lock().unwrap();
+    let request = preview.as_ref().unwrap();
+    let read_tool = request
+        .tools
+        .iter()
+        .find(|tool| tool.name == "read_file")
+        .unwrap();
+    assert_eq!(read_tool.parameters["required"], json!(["path"]));
+    assert!(read_tool.parameters["properties"]["path"]
+        .get("description")
+        .is_none());
+}
+
+#[test]
+fn provider_credential_is_redacted_before_send_and_preview() {
+    struct Model;
+    impl devcode::agent::Model for Model {
+        fn redact_sensitive(&self, text: &str) -> String {
+            text.replace("fixture-key", "[REDACTED]")
+        }
+        fn complete(
+            &self,
+            req: &devcode::agent::Request,
+        ) -> Result<Response, devcode::agent::ModelError> {
+            assert!(req.messages.last().unwrap().content.contains("[REDACTED]"));
+            Ok(Response {
+                text: Some("done".into()),
+                tool_calls: vec![],
+                usage: Usage::default(),
+            })
+        }
+    }
+    let preview = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let limits = LoopLimits {
+        outbound_preview: Some(preview.clone()),
+        ..Default::default()
+    };
+    run_agent_loop(
+        Profile::Ask,
+        &Model,
+        &ToolRegistry::new(),
+        "fixture-key",
+        &limits,
+    )
+    .unwrap();
+    let preview = preview.lock().unwrap();
+    assert!(!serde_json::to_string(preview.as_ref().unwrap())
+        .unwrap()
+        .contains("fixture-key"));
+}

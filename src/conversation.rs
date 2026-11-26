@@ -30,6 +30,8 @@ struct Saved {
     context_used: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     token_ledger: Vec<LedgerEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    private_policy: Option<String>,
 }
 
 /// Full conversation payload restored on resume.
@@ -44,6 +46,7 @@ pub struct LoadedConversation {
     pub total_out: u64,
     pub context_used: u64,
     pub token_ledger: Vec<LedgerEntry>,
+    pub private_policy: Option<String>,
 }
 
 /// Token counters persisted with a conversation for `/status` and the status line on resume.
@@ -53,6 +56,7 @@ pub struct ConversationUsage {
     pub total_out: u64,
     pub context_used: u64,
     pub token_ledger: Vec<LedgerEntry>,
+    pub private_policy: Option<String>,
 }
 
 /// One saved conversation, newest first in `list`.
@@ -150,6 +154,7 @@ pub(crate) fn save_with_scope(
         total_out: usage.total_out,
         context_used: usage.context_used,
         token_ledger: usage.token_ledger,
+        private_policy: usage.private_policy,
     };
     let json = serde_json::to_vec(&saved).map_err(std::io::Error::other)?;
     let tmp = dir.join(format!("{id}.{}.json.tmp", std::process::id()));
@@ -209,6 +214,7 @@ pub fn load_full(root: &Path, id: &str) -> std::io::Result<LoadedConversation> {
         total_out: saved.total_out,
         context_used: saved.context_used,
         token_ledger: saved.token_ledger,
+        private_policy: saved.private_policy,
     })
 }
 

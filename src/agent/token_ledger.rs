@@ -80,8 +80,16 @@ pub struct LedgerEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LedgerEvent {
-    Gate { outcome: String },
-    Checkpoint { session: String, step: usize },
+    ToolDowngrade {
+        mode: super::tool_protocol::ToolMode,
+    },
+    Gate {
+        outcome: String,
+    },
+    Checkpoint {
+        session: String,
+        step: usize,
+    },
 }
 
 pub fn summary(entries: &[LedgerEntry]) -> Option<String> {

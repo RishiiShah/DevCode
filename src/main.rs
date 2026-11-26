@@ -33,6 +33,16 @@ fn handle_plain_slash(line: &str, session: &mut devcode::Session) -> bool {
             }
             true
         }
+        "/egress" => {
+            println!(
+                "{}",
+                session
+                    .outbound_preview()
+                    .as_deref()
+                    .unwrap_or("no model request sent in this session")
+            );
+            true
+        }
         "/status" => {
             println!("{}", session.provider_label());
             if let Some(status) = session.capability_status() {
