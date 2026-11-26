@@ -147,3 +147,38 @@ fn per_model_context_window_updates_on_switch_and_preserves_unknown_config() {
     assert_eq!(s.context_window(), Some(1_048_576));
     assert_eq!(s.context_window_source(), Some("model"));
 }
+
+#[test]
+fn session_list_models_filters_non_chat_entries() {
+    use devcode::agent::{Model, ModelError, Request, Response};
+
+    struct MixedCatalogModel;
+    impl Model for MixedCatalogModel {
+        fn complete(&self, _: &Request) -> Result<Response, ModelError> {
+            unreachable!()
+        }
+        fn list_models(&self) -> Result<Vec<String>, ModelError> {
+            Ok(vec![
+                "gpt-4o".into(),
+                "text-embedding-3-large".into(),
+                "bge-reranker-large".into(),
+                "llama-guard-3".into(),
+                "nsfw-detector".into(),
+                "tts-1".into(),
+                "whisper-1".into(),
+                "shield-safety".into(),
+                "claude-sonnet-4".into(),
+            ])
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let s = Session::new(
+        root.path().to_path_buf(),
+        Config::default(),
+        Profile::Ask,
+        Box::new(MixedCatalogModel),
+        devcode::tools::registry(root.path().to_path_buf(), false),
+    );
+    assert_eq!(s.list_models().unwrap(), vec!["gpt-4o", "claude-sonnet-4"]);
+}

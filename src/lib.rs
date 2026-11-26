@@ -306,9 +306,12 @@ impl Session {
             .unwrap_or_default()
     }
     pub fn list_models(&self) -> Result<Vec<String>, DevCodeError> {
-        self.model
+        let mut models = self
+            .model
             .list_models()
-            .map_err(|e| DevCodeError::Config(e.to_string()))
+            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        models.retain(|id| config::is_chat_model(id));
+        Ok(models)
     }
     /// Switches the model id. Session only; `.devcode.json` is not rewritten.
     pub fn set_model(&mut self, id: &str) -> Result<Option<String>, DevCodeError> {

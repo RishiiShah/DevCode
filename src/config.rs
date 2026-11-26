@@ -92,6 +92,19 @@ fn matches_reasoning_prefix(model: &str, prefix: &str) -> bool {
             .is_some_and(|rest| rest.starts_with(['-', '.', '_']))
 }
 
+const NON_CHAT_MODEL_TOKENS: &[&str] = &[
+    "embed", "rerank", "guard", "detector", "tts", "whisper", "safety",
+];
+
+/// Returns `false` for non-chat catalog entries (embeddings, rerankers, safety/guardrails,
+/// detectors, speech/TTS) so model pickers list chat models only.
+pub fn is_chat_model(id: &str) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    !NON_CHAT_MODEL_TOKENS
+        .iter()
+        .any(|token| lower.contains(token))
+}
+
 pub fn default_test_globs() -> Vec<String> {
     vec![
         "tests/**".to_string(),

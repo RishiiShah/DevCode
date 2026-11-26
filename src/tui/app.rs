@@ -475,7 +475,8 @@ impl App {
             })
         );
         match result {
-            Ok(list) => {
+            Ok(mut list) => {
+                list.retain(|id| crate::config::is_chat_model(id));
                 self.models = list.clone();
                 if let Some(Modal::Picker {
                     kind: PickKind::Model,
@@ -3321,5 +3322,50 @@ mod tests {
         a.on_key(key(KeyCode::Enter));
         a.on_event(Ev::Models(Ok(vec!["a/one".into(), "b/two".into()])));
         assert!(matches!(a.modal, Some(Modal::Picker { selected: 1, .. })));
+    }
+
+    #[test]
+    fn model_picker_hides_non_chat_models_but_keeps_typed_id_usable() {
+        let mut a = app();
+        a.on_event(Ev::Models(Ok(vec![
+            "nvidia/nemotron-3.5-super-vl-120b-a12b".into(),
+            "nvidia/nv-embedqa-e5-v5".into(),
+            "nvidia/llama-3.2-nv-rerankqa-1b-v2".into(),
+            "meta/llama-guard-3-8b".into(),
+            "hive/ai-generated-detector".into(),
+            "openai/tts-1".into(),
+            "openai/whisper-large-v3".into(),
+            "nvidia/nemotron-content-safety-reasoning-4b".into(),
+            "gpt-4o".into(),
+        ])));
+        assert_eq!(
+            a.models,
+            vec!["nvidia/nemotron-3.5-super-vl-120b-a12b", "gpt-4o"]
+        );
+
+        // Opening /model shows only the chat models, and typing a filtered/custom id still submits it.
+        type_str(&mut a, "/model");
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            picker(&a).visible(),
+            vec!["nvidia/nemotron-3.5-super-vl-120b-a12b", "gpt-4o"]
+        );
+        type_str(&mut a, "openai/whisper-large-v3");
+        assert!(picker(&a).visible().is_empty());
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &actions[..],
+            [Action::Send(Cmd::SetModel(id))] if id == "openai/whisper-large-v3"
+        ));
+
+        // Direct `/model <id>` also works for non-chat or unlisted ids.
+        a.input.clear();
+        a.cursor = 0;
+        type_str(&mut a, "/model openai/tts-1");
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &actions[..],
+            [Action::Send(Cmd::SetModel(id))] if id == "openai/tts-1"
+        ));
     }
 }
