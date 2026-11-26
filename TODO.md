@@ -31,19 +31,12 @@ UPDATED        : 2026-11-26
 ## 2.0 Open Work (Peer Bar)
 
 ### 2.1 Next work order
-Handoff rules: one item per commit (`<type>: <what>`); stage named files only; never push. Gate before each commit: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` (409 pass at `HEAD`). TDD: failing test first. No live LLM runs (cost) unless the user says so.
+Handoff rules: one item per commit (`<type>: <what>`); stage named files only; never push. Gate before each commit: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`. TDD: failing test first. No live LLM runs (cost) unless the user says so.
 
-1. **P11** per-model context window. Where: `src/config.rs` presets, `Session::context_window` (`src/lib.rs`), `LoopLimits.context_window`. Do: model id → window table for preset catalogs (NIM nemotron, Gemini 3, Claude, GPT); unknown models keep the config value; `/status` shows source. Accept: unit test that `nvidia/nemotron-3.5-super-vl-120b-a12b` gets its real window, not 32k; `should_compact` not triggered at 10k tokens.
-2. **P12** model picker hides non-chat models. Where: `Session::list_models`, `src/tui/app.rs` `on_models`. Do: drop ids matching embed/rerank/guard/detector/tts/whisper/safety; keep a typed id usable. Accept: app test with mixed catalog.
-3. **S1** state dir pruning (ARCH §4.2, §4.3; NFR-7). Where: `src/state.rs`, `src/manifest/rollback.rs`. Do: at session start prune completed manifests older than 7 days and unreferenced blobs; `devcode gc` subcommand. Accept: test with aged manifest files; referenced blobs kept.
-4. **S2** old `.devcode/` in workspaces: on startup, when `<root>/.devcode/` exists and the state dir is elsewhere, print one Info line naming it as safe to delete; never delete it. Accept: app or lib test.
-5. **U16b** resume fidelity. Where: `src/conversation.rs`, `App::on_resumed`. Do: save per-tool `ok` flag and edit diff with the conversation (new optional field, old files still load); replay shows grouped lines like a live run. Accept: `tests/m28_resume.rs` round-trip with a diff; old-format JSON loads.
-6. **U16** `/compact` trigger and `/export` (markdown of the conversation to a path the user names).
-7. **U3/U17** Ctrl-T on any historical tool group (not only latest): selection cursor over groups.
-8. **T1** `tests/m13_connect.rs` `tty_connect_rebuilds_provider_for_next_request` failed once under load (10 s PTY deadline); make deterministic.
-9. **U13** live TUI dogfood (user runs it; needs a key). **U2a** remainder, **P10a–d**, sandbox: after the above.
+1. **U3/U17** Ctrl-T on any historical tool group (not only latest): selection cursor over groups.
+2. **U13** live TUI dogfood (user runs it; needs a key). **U2a** remainder, **U16** remainder (`/fork`, `/rewind`), **P10a–d**, sandbox: after the above.
 
-Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate, approvals, discipline, NIM live per RES-012). That is scaffolding, not peer parity.
+Landed on `feat/peer-bar-next`: P11, P12, S1, S2, U16b, U16 (`/compact`, `/export`), T1 (`m13_connect` PTY deadline). Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate, approvals, discipline, NIM live per RES-012). That is scaffolding, not peer parity.
 
 ### 2.2 Accounts and providers (RES-014)
 
@@ -56,8 +49,8 @@ Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate,
 | P8 | partial | Default `gemini-3-flash-preview` | Catalog churn; no peer-grade model registry |
 | P9 | partial | Prefetch + `App.models` cache on connect/switch | OpenCode durable registry and variants |
 | P10 | partial | Account rows stored\|env\|missing; connect persists; `openai` + `openrouter` presets; Gemini OAuth; opt-in keyring; named slots + `auth switch` | See P10a–d |
-| P11 | open | `context_window` per provider config; presets default 32k; status line shows "% context left" | Per-model window (catalog metadata or table); too-small window triggers compaction every step |
-| P12 | open | Model picker lists the provider catalog | Hide or mark non-chat models (embedding, guard, detector) |
+| P11 | partial | Per-model context window table (`src/config.rs`, `Session::context_window`, `LoopLimits`) + `/status` source | Dynamic window from provider `/models` metadata when available |
+| P12 | partial | `Session::list_models` and `App::on_models` filter non-chat models (embed/rerank/guard/detector/tts/whisper/safety) while keeping typed ids usable | Provider capability metadata beyond id heuristics |
 
 - [ ] **P10a** Native Anthropic Messages adapter (bar: OpenCode/pi). *Landed*: `src/agent/anthropic.rs`, preset `anthropic`, object `tool_choice` (omitted with empty `tools`), `interleaved-thinking` beta header, `/effort` → `thinking.budget_tokens`; tests `m20_anthropic`. *Missing*: Anthropic OAuth, forced SSE on `complete()`, live keyed dogfood.
 - [ ] **P10b** OAuth / device-code login for at least one provider (bar: Codex, gemini-cli). *Landed*: Google OAuth in `src/auth.rs` (`auth login gemini --oauth`, loopback callback, `NO_BROWSER=1` / `--with-stdin` paste-code), `oauth-gemini.json`, auto refresh on expiry and `401`, Code Assist backend `src/agent/code_assist.rs` (`gemini:oauth` slot or fallback); tests `m21_oauth`, `m25_code_assist`. *Missing*: device-code flow, non-Gemini OAuth (Codex, Anthropic), live Google OAuth dogfood.
@@ -85,7 +78,7 @@ Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate,
 - [ ] **U14** Syntax highlighting & themes (bar: Codex, OpenCode, Mistral Vibe). *Missing*: `syntect` code-fence and diff highlighting in `src/tui/markdown.rs` and `src/tui/view.rs`, italics/links/task-lists, `/theme` picker, `OSC 11` light/dark background auto-detection.
 - [ ] **U15** Composer `@` mentions, `!` shell mode & editor ergonomics (bar: Codex, OpenCode, Pi, Gemini CLI). *Missing*: `@` fuzzy file-mention popup, `!` shell execution mode, `$EDITOR` prompt launch, `[paste #N]` collapse, clipboard image paste, `Ctrl-R` persistent history search, optional Vim mode.
 - [x] **U16a** Conversations saved per prompt to `<state>/conversations/`; `devcode -c`, `--resume [ID]`, `/resume` picker replays the transcript (ARCH §4.3; `src/conversation.rs`, `tests/m28_resume.rs`). Harness state moved out of the workspace after `rm -rf` deleted `.devcode/blobs` (`tests/m27_snapshots.rs`).
-- [ ] **U16** Session & compaction UI (bar: OpenCode, Pi, Codex, Cline; `RES-005`). *Landed*: `/resume` picker (U16a). *Missing*: `/fork` (`/tree`) branching, `/compact` UI trigger (core in `src/discipline/compaction.rs`), `/export`, double-`Esc` prompt `/rewind`.
+- [ ] **U16** Session & compaction UI (bar: OpenCode, Pi, Codex, Cline; `RES-005`). *Landed*: `/resume` picker (U16a), `/resume` diff/outcome/token fidelity (U16b), `/compact` trigger and `/export` markdown (U16). *Missing*: `/fork` (`/tree`) branching, double-`Esc` prompt `/rewind`.
 - [ ] **U17** Approval, diff & tool-card depth (bar: OpenCode, Codex, Kimi Code, Stakpak). *Landed*: reject then type the correction, delivered mid-run (`SteerInbox`). *Missing*: scoped command-pattern always-allow rules, standalone `/diff` viewer (unified + split), expanding/collapsing arbitrary historical tool cards beyond latest `Ctrl-T`.
 - [ ] **U18** Terminal protocols & polish (bar: Codex, Pi, Mistral Vibe, OpenCode). *Missing*: synchronized output (`\x1b[?2026h`/`l`), transcript scrollbar thumb, double/triple-click selection, `OSC 8` clickable links, Kitty keyboard protocol, `OSC 9`/`777`/BEL completion alerts, `--no-alt-screen` inline scrollback mode.
 
