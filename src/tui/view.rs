@@ -935,22 +935,15 @@ fn label_parts(label: &str) -> (&str, &str, Option<&str>) {
 }
 
 /// Remaining context as a small meter, green → yellow → red as it fills.
+/// "96% context left" as Codex shows it: dim until it runs low, no glyph meter (block glyphs
+/// fall back to odd shapes in many terminal fonts).
 fn context_meter(left: u64) -> Vec<Span<'static>> {
-    const CELLS: u64 = 8;
-    let filled = ((left * CELLS) + 50) / 100;
-    let color = match left {
-        50.. => Color::Green,
-        20..50 => Color::Yellow,
-        _ => Color::Red,
+    let style = match left {
+        25.. => Style::new().add_modifier(Modifier::DIM),
+        10..25 => Style::new().fg(Color::Yellow),
+        _ => Style::new().fg(Color::Red),
     };
-    vec![
-        Span::styled("▰".repeat(filled as usize), Style::new().fg(color)),
-        Span::styled(
-            "▱".repeat((CELLS - filled) as usize),
-            Style::new().fg(Color::DarkGray),
-        ),
-        Span::styled(format!(" {left}% context"), Style::new().fg(color)),
-    ]
+    vec![Span::styled(format!("{left}% context left"), style)]
 }
 
 /// Session row under the input. Left: profile, provider, model, effort. Right: the
@@ -960,24 +953,24 @@ fn draw_info(frame: &mut Frame, area: Rect, app: &App) {
     let mut right: Vec<Vec<Span<'static>>> = Vec::new();
     for item in &app.statusline {
         let spans = match item.as_str() {
-            "processes" if app.bg_processes > 0 => vec![
-                Span::styled("◉ ", Style::new().fg(Color::Green)),
-                Span::styled(format!("{} background", app.bg_processes), dim),
-            ],
+            "processes" if app.bg_processes > 0 => vec![Span::styled(
+                format!("{} background", app.bg_processes),
+                dim,
+            )],
             "context" => match app.context_left() {
                 Some(left) => context_meter(left),
                 None => continue,
             },
             "tokens" if app.total_in + app.total_out > 0 => vec![Span::styled(
                 format!(
-                    "↑{} ↓{}",
+                    "{} in · {} out",
                     super::app::tokens(app.total_in),
                     super::app::tokens(app.total_out)
                 ),
                 dim,
             )],
             "branch" => match &app.branch {
-                Some(branch) => vec![Span::styled(format!("⎇ {branch}"), dim)],
+                Some(branch) => vec![Span::styled(branch.clone(), dim)],
                 None => continue,
             },
             "folder" => vec![Span::styled(
@@ -990,14 +983,13 @@ fn draw_info(frame: &mut Frame, area: Rect, app: &App) {
     }
     let (provider, model, effort) = label_parts(&app.provider);
     let mut left = vec![
-        Span::styled(" ● ", Style::new().fg(profile_color(app.profile))),
+        Span::raw(" "),
         Span::styled(
             app.profile.name().to_string(),
             Style::new().bold().fg(profile_color(app.profile)),
         ),
-        Span::styled("   ", dim),
-        Span::styled(format!("{provider} "), dim),
-        Span::raw(model.to_string()),
+        Span::styled(format!(" · {provider} · "), dim),
+        Span::styled(model.to_string(), dim),
     ];
     if let Some(effort) = effort {
         left.push(Span::styled(format!(" · {effort}"), dim));
@@ -1009,7 +1001,7 @@ fn draw_info(frame: &mut Frame, area: Rect, app: &App) {
         let mut out = Vec::new();
         for (i, item) in right.iter().enumerate() {
             if i > 0 {
-                out.push(Span::styled("   ", dim));
+                out.push(Span::styled(" · ", dim));
             }
             out.extend(item.iter().cloned());
         }
@@ -1534,7 +1526,10 @@ mod tests {
         assert!(!left.contains("step"));
         assert!(!left.contains("blocked"));
         let screen = render(&mut app, 80, 20);
-        assert!(footer_row(&screen).contains("↑12.3k ↓678"), "{screen}");
+        assert!(
+            footer_row(&screen).contains("12.3k in · 678 out"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -1595,8 +1590,7 @@ mod tests {
         let mut app = App::new(Profile::Build, "nim · model-x".into(), None);
         let screen = render(&mut app, 80, 20);
         let info = footer_row(&screen);
-        assert!(info.contains("● build"), "{screen}");
-        assert!(info.contains("nim model-x"), "{screen}");
+        assert!(info.contains("build · nim · model-x"), "{screen}");
         assert!(screen.contains("model     model-x"), "{screen}");
         assert!(screen.contains("provider  nim"), "{screen}");
         assert!(
@@ -1932,7 +1926,7 @@ mod tests {
         app.total_out = 2_140;
         let screen = render(&mut app, 60, 12);
         let info = footer_row(&screen);
-        assert!(info.contains("↑129.4k ↓2.1k"), "{info}");
+        assert!(info.contains("129.4k in · 2.1k out"), "{info}");
         assert!(info.contains('…'), "{info}");
         assert_eq!(info.width(), 60, "{info}");
     }
@@ -2013,8 +2007,8 @@ mod tests {
         app.context_used = 25_000;
         app.branch = Some("feat/tui".into());
         let info = footer_row(&render(&mut app, 120, 12)).to_string();
-        assert!(info.contains("▰▰▰▰▰▰▱▱ 75% context"), "{info}");
-        assert!(info.contains("⎇ feat/tui"), "{info}");
+        assert!(info.contains("75% context left"), "{info}");
+        assert!(info.contains("feat/tui"), "{info}");
         app.statusline.retain(|s| s != "branch");
         let info = footer_row(&render(&mut app, 120, 12)).to_string();
         assert!(!info.contains("feat/tui"), "{info}");

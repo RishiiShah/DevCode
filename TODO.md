@@ -4,7 +4,7 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1004-TODO
-REVISION       : 0.3.0
+REVISION       : 0.3.1
 STATUS         : Living tracker (non-normative; specs win on conflict)
 AUTHOR         : DevCode Core Engineering Group
 OWNS           : What is open, what is partial, what comes next
@@ -31,11 +31,17 @@ UPDATED        : 2026-11-26
 ## 2.0 Open Work (Peer Bar)
 
 ### 2.1 Next work order
-1. U13: full-screen TUI dogfood with a live provider. User dogfood found the streaming duplicates and the compaction wrong-question bug; unit tests and render previews did not.
-2. P11: real context window per model. The fixed 32k preset window made compaction run nearly every step.
-3. U2a remainder: streamed tool-argument UI, `--plain` streaming, live keyed run.
-4. P10a–P10d OAuth breadth (Anthropic/Codex OAuth, device code, keyring default): no user-hit gap yet; after 1–3.
-5. Sandbox toward Codex (bwrap / Seatbelt); A4 signing when the install path is real.
+Handoff rules: one item per commit (`<type>: <what>`); stage named files only; never push. Gate before each commit: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` (409 pass at `HEAD`). TDD: failing test first. No live LLM runs (cost) unless the user says so.
+
+1. **P11** per-model context window. Where: `src/config.rs` presets, `Session::context_window` (`src/lib.rs`), `LoopLimits.context_window`. Do: model id → window table for preset catalogs (NIM nemotron, Gemini 3, Claude, GPT); unknown models keep the config value; `/status` shows source. Accept: unit test that `nvidia/nemotron-3.5-super-vl-120b-a12b` gets its real window, not 32k; `should_compact` not triggered at 10k tokens.
+2. **P12** model picker hides non-chat models. Where: `Session::list_models`, `src/tui/app.rs` `on_models`. Do: drop ids matching embed/rerank/guard/detector/tts/whisper/safety; keep a typed id usable. Accept: app test with mixed catalog.
+3. **S1** state dir pruning (ARCH §4.2, §4.3; NFR-7). Where: `src/state.rs`, `src/manifest/rollback.rs`. Do: at session start prune completed manifests older than 7 days and unreferenced blobs; `devcode gc` subcommand. Accept: test with aged manifest files; referenced blobs kept.
+4. **S2** old `.devcode/` in workspaces: on startup, when `<root>/.devcode/` exists and the state dir is elsewhere, print one Info line naming it as safe to delete; never delete it. Accept: app or lib test.
+5. **U16b** resume fidelity. Where: `src/conversation.rs`, `App::on_resumed`. Do: save per-tool `ok` flag and edit diff with the conversation (new optional field, old files still load); replay shows grouped lines like a live run. Accept: `tests/m28_resume.rs` round-trip with a diff; old-format JSON loads.
+6. **U16** `/compact` trigger and `/export` (markdown of the conversation to a path the user names).
+7. **U3/U17** Ctrl-T on any historical tool group (not only latest): selection cursor over groups.
+8. **T1** `tests/m13_connect.rs` `tty_connect_rebuilds_provider_for_next_request` failed once under load (10 s PTY deadline); make deterministic.
+9. **U13** live TUI dogfood (user runs it; needs a key). **U2a** remainder, **P10a–d**, sandbox: after the above.
 
 Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate, approvals, discipline, NIM live per RES-012). That is scaffolding, not peer parity.
 
@@ -69,7 +75,7 @@ Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate,
 | U4 | partial | Codex-style docked approval panel (numbered diff, option list, Enter = No on risky commands); edit diffs in transcript | Scoped always-allow command rules |
 | U5 | partial | Ctrl-K palette; live slash suggestions; docked pickers open on the current choice | OpenCode slash-surface depth |
 | U6 | partial | In-repo fuzzy scorer | Peer fuzzy quality and ranking |
-| U7 | partial | Activity row above input; status line under it (`/status`, `/statusline`: model, context left, tokens, branch, folder, background processes) | n/a |
+| U7 | partial | Activity row above input; status line under it, plain dim text joined by ` · ` (`/status`, `/statusline`: model, context left, tokens, branch, folder, background processes); no block-glyph meters (font fallback) | n/a |
 | U8 | partial | Shift/Alt+Enter multiline | n/a |
 | U11 | partial | History vs scroll key split | Full-screen ratatui E2E dogfood (RES-013) |
 | U12 | partial | Identical tool-loop → NoProgress | n/a |
