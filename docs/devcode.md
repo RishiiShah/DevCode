@@ -4,7 +4,7 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1000-ARCH
-REVISION       : 0.4.4-draft
+REVISION       : 0.4.5-draft
 STATUS         : Working Draft (Engineering Specification)
 AUTHOR         : DevCode Architecture Group
 OWNS           : Design mechanisms (how). Requirements, NFRs, gates: ATE-1001-PRD
@@ -303,12 +303,12 @@ Project-root file defining build, test, and verification commands:
 The provider block and implemented fields are specified in `docs/mvp.md` M4 and M12.
 
 ### 7.5 Model Capabilities, Token Ledger & Caching (PRD FR-7)
-Capability records and streaming-usage downgrade are implemented. Ledger, budgets, caching, text-tool and schema downgrade, and egress are planned. Peer evidence: RES-016.
+Capability records, streaming-usage downgrade, and the per-call token ledger are implemented. Budgets, caching, text-tool and schema downgrade, and egress are planned. Peer evidence: RES-016.
 - **Capability record**: one record per (provider, model), not per adapter (NIM and OpenRouter share an adapter but differ per model). Fields: native and parallel tool calls, streaming, streaming usage, reasoning control, cache mechanism (explicit, automatic, none), context window, max output, vision, edit format, prices (input, output, cache-read, cache-write). Source precedence: user config, provider `/models`, bundled table, conservative default. The source is reported as with `context_window_source`.
 - **Configuration**: `model_capabilities` maps the connector name or custom endpoint URL to exact model IDs and per-field overrides. Example: `{"model_capabilities":{"openai":{"gpt-5":{"streaming_usage":false}}}}`. Catalog metadata is refreshed when `/model` fetches models. Missing fields fall through individually. Price fields use USD millionths per million tokens.
 - **Runtime downgrade**: the loop counts failures per record. N malformed tool calls switch to a text tool protocol; a rejected `stream_options` disables streaming usage; a schema rejection simplifies the schema. Each downgrade is logged and shown in `/status`. Peers choose native or emulated tool calls by flag or template (goose, mini-swe-agent) and none downgrades at runtime, so this mechanism needs its own tests.
 - **Ledger**: one row per model call, normalized: input = uncached + cache-read + cache-write; reasoning counted inside output; each counter `Option` where `None` means missing, never 0; each figure tagged `reported` or `estimated` (bytes/4). Persisted fields use `#[serde(default)]` so saved conversations still load (`tests/m28_resume.rs`).
-- **Attribution**: input split into system prompt, tool schemas, history, file reads, command output; shown in `/status`, the end-of-task line, and the tool log.
+- **Attribution**: estimated input split into system prompt, tool schemas, history, file reads, and command output. Reported counters and estimated components appear in `/status`, the end-of-task output, and the tool log. Conversation rows retain gate outcomes and immediate checkpoint references. Rows cover harness-level completion attempts, including errors where the provider supplied counts. Transport retries inside adapters have no separate rows.
 - **Budgets**: NFR-3 and NFR-4 enforced before send; per-provider estimate calibration against reported usage; optional task cap with a named stop reason.
 - **Caching**: stable prefix; Anthropic gets explicit markers on system prompt, last tool, and recent messages (where the record allows tool-level markers); OpenAI and Gemini rely on automatic caching. Report hit rate from cache-read over input.
 - **Egress**: mark tool output as untrusted in prompts; deny private paths; preview what leaves the machine (FR-7.6).

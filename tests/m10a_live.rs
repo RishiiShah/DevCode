@@ -55,10 +55,13 @@ fn nim_smoke() {
             .replace(&key, "[REDACTED]")
     );
     println!(
-        "usage: input={} output={}",
+        "usage: input={:?} output={:?}",
         response.usage.input_tokens, response.usage.output_tokens
     );
-    assert!(response.usage.input_tokens > 0 && response.usage.output_tokens > 0);
+    assert!(
+        response.usage.input_tokens.unwrap_or_default() > 0
+            && response.usage.output_tokens.unwrap_or_default() > 0
+    );
 }
 
 #[test]
@@ -135,10 +138,13 @@ fn gemini_smoke() {
                     response.text.as_ref().map_or(0, |s| s.len())
                 );
                 println!(
-                    "usage: input={} output={}",
+                    "usage: input={:?} output={:?}",
                     response.usage.input_tokens, response.usage.output_tokens
                 );
-                assert!(response.usage.input_tokens > 0 && response.usage.output_tokens > 0);
+                assert!(
+                    response.usage.input_tokens.unwrap_or_default() > 0
+                        && response.usage.output_tokens.unwrap_or_default() > 0
+                );
                 return;
             }
             Err(err) => {

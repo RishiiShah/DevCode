@@ -188,8 +188,8 @@ fn stream_request_text_deltas_and_usage() {
     assert_eq!(parts.concat(), "Hello");
     assert!(!parts.iter().any(|part| part.contains("hidden")));
     assert_eq!(response.text.as_deref(), Some("Hello"));
-    assert_eq!(response.usage.input_tokens, 11);
-    assert_eq!(response.usage.output_tokens, 4);
+    assert_eq!(response.usage.input_tokens, Some(11));
+    assert_eq!(response.usage.output_tokens, Some(4));
 }
 
 #[test]
@@ -409,8 +409,8 @@ fn deltas_arrive_before_the_rest_of_the_body() {
     );
     assert_eq!(parts.concat(), "Hello");
     assert_eq!(response.text.as_deref(), Some("Hello"));
-    assert_eq!(response.usage.input_tokens, 2);
-    assert_eq!(response.usage.output_tokens, 3);
+    assert_eq!(response.usage.input_tokens, Some(2));
+    assert_eq!(response.usage.output_tokens, Some(3));
 }
 
 #[test]
@@ -427,8 +427,8 @@ fn non_sse_json_200_skips_callbacks() {
         .unwrap();
     assert_eq!(calls, 0);
     assert_eq!(response.text.as_deref(), Some("json-body"));
-    assert_eq!(response.usage.input_tokens, 3);
-    assert_eq!(response.usage.output_tokens, 5);
+    assert_eq!(response.usage.input_tokens, Some(3));
+    assert_eq!(response.usage.output_tokens, Some(5));
     let sent = requests.lock().unwrap();
     assert_eq!(sent.len(), 1);
     assert_eq!(request_json(&sent[0])["stream"], true);

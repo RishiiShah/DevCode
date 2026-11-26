@@ -358,16 +358,18 @@ fn test_end_of_task_summary_line_matches_scripted_run() {
                 .to_string(),
             }],
             usage: Usage {
-                input_tokens: 120,
-                output_tokens: 35,
+                input_tokens: Some(120),
+                output_tokens: Some(35),
+                ..Usage::default()
             },
         }),
         Ok(Response {
             text: Some("Task complete".to_string()),
             tool_calls: Vec::new(),
             usage: Usage {
-                input_tokens: 180,
-                output_tokens: 45,
+                input_tokens: Some(180),
+                output_tokens: Some(45),
+                ..Usage::default()
             },
         }),
     ];

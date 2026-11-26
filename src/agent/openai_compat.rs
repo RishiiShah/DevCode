@@ -265,6 +265,7 @@ impl OpenAiCompat {
         }
         let value: Value = serde_json::from_str(data)
             .map_err(|err| ModelError::FormatError(self.redact(&err.to_string())))?;
+        accum.usage.merge(openai_usage(&value));
         if let Some(reasoning) = value
             .pointer("/choices/0/delta/reasoning_content")
             .and_then(Value::as_str)
@@ -294,18 +295,6 @@ impl OpenAiCompat {
             for item in items {
                 apply_tool_call(item, &mut accum.calls)?;
             }
-        }
-        if let Some(prompt) = value
-            .pointer("/usage/prompt_tokens")
-            .and_then(Value::as_u64)
-        {
-            accum.usage.input_tokens = prompt;
-        }
-        if let Some(completion) = value
-            .pointer("/usage/completion_tokens")
-            .and_then(Value::as_u64)
-        {
-            accum.usage.output_tokens = completion;
         }
         Ok(true)
     }
@@ -404,9 +393,11 @@ impl OpenAiCompat {
                     while let Some(ev) = current {
                         match ev {
                             HttpEvent::Bytes(chunk) => {
-                                let keep_going = parser.push(&chunk, &mut |_event, data| {
-                                    self.on_sse_data(data, &mut accum, on_chunk)
-                                })?;
+                                let keep_going = parser
+                                    .push(&chunk, &mut |_event, data| {
+                                        self.on_sse_data(data, &mut accum, on_chunk)
+                                    })
+                                    .map_err(|error| error.with_usage(accum.usage.clone()))?;
                                 if !keep_going {
                                     done = true;
                                     break;
@@ -414,19 +405,26 @@ impl OpenAiCompat {
                             }
                             HttpEvent::Eof => break,
                             HttpEvent::Transport(err) => {
-                                return Err(ModelError::Network(self.redact(&err)));
+                                return Err(
+                                    ModelError::Network(self.redact(&err)).with_usage(accum.usage)
+                                );
                             }
                             HttpEvent::Format(err) => {
-                                return Err(ModelError::FormatError(self.redact(&err)));
+                                return Err(ModelError::FormatError(self.redact(&err))
+                                    .with_usage(accum.usage));
                             }
                             HttpEvent::Json(_) | HttpEvent::Status { .. } => break,
                         }
-                        current = rx.recv()?;
+                        current = rx
+                            .recv()
+                            .map_err(|error| error.with_usage(accum.usage.clone()))?;
                     }
                     if !done {
-                        parser.finish(&mut |_event, data| {
-                            self.on_sse_data(data, &mut accum, on_chunk)
-                        })?;
+                        parser
+                            .finish(&mut |_event, data| {
+                                self.on_sse_data(data, &mut accum, on_chunk)
+                            })
+                            .map_err(|error| error.with_usage(accum.usage.clone()))?;
                     }
                     accum
                         .reasoning_redact
@@ -434,7 +432,9 @@ impl OpenAiCompat {
                     accum
                         .redact
                         .finish(&mut |piece| on_chunk(StreamChunk::Text(piece)));
-                    return assemble_stream(req, accum.raw, accum.calls, accum.usage);
+                    let usage = accum.usage;
+                    return assemble_stream(req, accum.raw, accum.calls, usage.clone())
+                        .map_err(|error| error.with_usage(usage));
                 }
                 None => return Err(ModelError::Network("unexpected end of response".into())),
             }
@@ -566,6 +566,13 @@ fn parse_chat_completion(
     value: &Value,
     req: &Request,
 ) -> Result<(Response, Option<String>), ModelError> {
+    parse_chat_completion_inner(value, req).map_err(|error| error.with_usage(openai_usage(value)))
+}
+
+fn parse_chat_completion_inner(
+    value: &Value,
+    req: &Request,
+) -> Result<(Response, Option<String>), ModelError> {
     let message = value
         .pointer("/choices/0/message")
         .ok_or_else(|| ModelError::FormatError("missing message".into()))?;
@@ -592,17 +599,28 @@ fn parse_chat_completion(
         .pointer("/choices/0/finish_reason")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let usage = Usage {
-        input_tokens: value
-            .pointer("/usage/prompt_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
-        output_tokens: value
-            .pointer("/usage/completion_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
-    };
-    finish_response(text, calls, usage, finish_reason)
+    finish_response(text, calls, openai_usage(value), finish_reason)
+}
+
+fn openai_usage(value: &Value) -> Usage {
+    let count = |path| value.pointer(path).and_then(Value::as_u64);
+    let input_tokens = count("/usage/prompt_tokens");
+    let cache_read_tokens = count("/usage/prompt_tokens_details/cached_tokens");
+    let cache_write_tokens = count("/usage/prompt_tokens_details/cache_write_tokens");
+    Usage {
+        input_tokens,
+        output_tokens: count("/usage/completion_tokens"),
+        uncached_input_tokens: input_tokens
+            .zip(cache_read_tokens)
+            .and_then(|(input, read)| {
+                input
+                    .checked_sub(read)?
+                    .checked_sub(cache_write_tokens.unwrap_or_default())
+            }),
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens: count("/usage/completion_tokens_details/reasoning_tokens"),
+    }
 }
 
 fn validated_tool(

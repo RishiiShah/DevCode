@@ -116,16 +116,18 @@ fn resume_round_trips_edit_diff_ok_flag_and_tokens_and_loads_legacy_json() {
                 },
             ],
             usage: Usage {
-                input_tokens: 150,
-                output_tokens: 40,
+                input_tokens: Some(150),
+                output_tokens: Some(40),
+                ..Usage::default()
             },
         }),
         Ok(Response {
             text: Some("edited".into()),
             tool_calls: Vec::new(),
             usage: Usage {
-                input_tokens: 210,
-                output_tokens: 15,
+                input_tokens: Some(210),
+                output_tokens: Some(15),
+                ..Usage::default()
             },
         }),
     ]);
@@ -154,6 +156,19 @@ fn resume_round_trips_edit_diff_ok_flag_and_tokens_and_loads_legacy_json() {
     // Resuming restores per-tool ok flag, unified diff, and token totals.
     let mut second = session(dir.path(), Vec::new());
     let loaded = second.resume_full(&summary.id).unwrap();
+    assert_eq!(loaded.token_ledger.len(), 2);
+    assert_eq!(loaded.token_ledger[0].reported.input_tokens, Some(150));
+    assert!(loaded.token_ledger[0].reported.cache_read_tokens.is_none());
+    assert!(loaded.token_ledger[0].estimated.system_prompt > 0);
+    assert!(loaded.token_ledger[0].events.iter().any(|event| matches!(
+        event,
+        devcode::agent::token_ledger::LedgerEvent::Checkpoint { .. }
+    )));
+    assert!(loaded.token_ledger[1].events.iter().any(|event| matches!(
+        event,
+        devcode::agent::token_ledger::LedgerEvent::Gate { .. }
+    )));
+    assert!(loaded.token_ledger[1].estimated.file_reads > 0);
     assert_eq!(loaded.total_in, 360);
     assert_eq!(loaded.total_out, 55);
     assert_eq!(loaded.context_used, 210);
@@ -187,6 +202,7 @@ fn resume_round_trips_edit_diff_ok_flag_and_tokens_and_loads_legacy_json() {
     let legacy = devcode::conversation::load_full(dir.path(), legacy_id).unwrap();
     assert_eq!(legacy.title, "old prompt");
     assert!(legacy.tool_outcomes.is_empty());
+    assert!(legacy.token_ledger.is_empty());
     assert_eq!(
         (legacy.total_in, legacy.total_out, legacy.context_used),
         (0, 0, 0)
@@ -224,24 +240,27 @@ fn session_compact_and_export_markdown() {
                 },
             ],
             usage: Usage {
-                input_tokens: 100,
-                output_tokens: 20,
+                input_tokens: Some(100),
+                output_tokens: Some(20),
+                ..Usage::default()
             },
         }),
         Ok(Response {
             text: Some("updated note".into()),
             tool_calls: Vec::new(),
             usage: Usage {
-                input_tokens: 120,
-                output_tokens: 10,
+                input_tokens: Some(120),
+                output_tokens: Some(10),
+                ..Usage::default()
             },
         }),
         Ok(Response {
             text: Some("second answer".into()),
             tool_calls: Vec::new(),
             usage: Usage {
-                input_tokens: 140,
-                output_tokens: 12,
+                input_tokens: Some(140),
+                output_tokens: Some(12),
+                ..Usage::default()
             },
         }),
     ]);
@@ -367,4 +386,30 @@ fn resume_restores_declared_scope_for_next_edit() {
         std::fs::read_to_string(dir.path().join("hero.tsx")).unwrap(),
         "new\n"
     );
+}
+
+#[test]
+fn failed_model_call_keeps_reported_zero_and_missing_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut original = session(
+        dir.path(),
+        vec![Err(ModelError::WithUsage {
+            error: Box::new(ModelError::Other("failed after reporting usage".into())),
+            usage: Box::new(Usage {
+                input_tokens: Some(0),
+                ..Usage::default()
+            }),
+        })],
+    );
+    assert!(original.prompt("run task").is_err());
+
+    let mut resumed = session(dir.path(), Vec::new());
+    let loaded = resumed.resume_full("").unwrap();
+    assert_eq!(loaded.token_ledger.len(), 1);
+    let row = &loaded.token_ledger[0];
+    assert!(!row.completed);
+    assert_eq!(row.reported.input_tokens, Some(0));
+    assert_eq!(row.reported.output_tokens, None);
+    let status = resumed.token_status().unwrap();
+    assert!(status.contains("0 input, missing output"), "{status}");
 }

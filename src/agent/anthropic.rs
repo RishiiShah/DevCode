@@ -40,8 +40,7 @@ struct StreamState {
     tools: BTreeMap<u64, ToolSlot>,
     /// Thinking and redacted_thinking blocks by content index, rebuilt from deltas.
     thinking: BTreeMap<u64, Value>,
-    input_tokens: u64,
-    output_tokens: u64,
+    usage: Usage,
 }
 
 impl StreamState {
@@ -52,8 +51,7 @@ impl StreamState {
             text: String::new(),
             tools: BTreeMap::new(),
             thinking: BTreeMap::new(),
-            input_tokens: 0,
-            output_tokens: 0,
+            usage: Usage::default(),
         }
     }
 }
@@ -330,6 +328,12 @@ impl Anthropic {
     }
 
     fn parse_response(value: &Value, req: &Request) -> Result<Response, ModelError> {
+        Self::parse_response_inner(value, req).map_err(|error| {
+            error.with_usage(anthropic_usage(value.get("usage").unwrap_or(&Value::Null)))
+        })
+    }
+
+    fn parse_response_inner(value: &Value, req: &Request) -> Result<Response, ModelError> {
         let blocks = value
             .get("content")
             .and_then(Value::as_array)
@@ -390,16 +394,7 @@ impl Anthropic {
         Ok(Response {
             text,
             tool_calls: calls,
-            usage: Usage {
-                input_tokens: value
-                    .pointer("/usage/input_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default(),
-                output_tokens: value
-                    .pointer("/usage/output_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default(),
-            },
+            usage: anthropic_usage(value.get("usage").unwrap_or(&Value::Null)),
         })
     }
 
@@ -559,9 +554,11 @@ impl Anthropic {
                     while let Some(ev) = current {
                         match ev {
                             HttpEvent::Bytes(chunk) => {
-                                let proceed = parser.push(&chunk, &mut |name, data| {
-                                    self.on_sse_event(name, data, &mut state, on_chunk)
-                                })?;
+                                let proceed = parser
+                                    .push(&chunk, &mut |name, data| {
+                                        self.on_sse_event(name, data, &mut state, on_chunk)
+                                    })
+                                    .map_err(|error| error.with_usage(state.usage.clone()))?;
                                 if !proceed {
                                     done = true;
                                     break;
@@ -569,19 +566,26 @@ impl Anthropic {
                             }
                             HttpEvent::Eof => break,
                             HttpEvent::Transport(err) => {
-                                return Err(ModelError::Network(self.redact(&err)));
+                                return Err(
+                                    ModelError::Network(self.redact(&err)).with_usage(state.usage)
+                                );
                             }
                             HttpEvent::Format(err) => {
-                                return Err(ModelError::FormatError(self.redact(&err)));
+                                return Err(ModelError::FormatError(self.redact(&err))
+                                    .with_usage(state.usage));
                             }
                             HttpEvent::Json(_) | HttpEvent::Status { .. } => break,
                         }
-                        current = rx.recv()?;
+                        current = rx
+                            .recv()
+                            .map_err(|error| error.with_usage(state.usage.clone()))?;
                     }
                     if !done {
-                        parser.finish(&mut |name, data| {
-                            self.on_sse_event(name, data, &mut state, on_chunk)
-                        })?;
+                        parser
+                            .finish(&mut |name, data| {
+                                self.on_sse_event(name, data, &mut state, on_chunk)
+                            })
+                            .map_err(|error| error.with_usage(state.usage.clone()))?;
                     }
                     state
                         .reasoning_tail
@@ -589,7 +593,10 @@ impl Anthropic {
                     state
                         .tail
                         .finish(&mut |piece| on_chunk(StreamChunk::Text(piece)));
-                    return self.assemble_stream(state, req);
+                    let usage = state.usage.clone();
+                    return self
+                        .assemble_stream(state, req)
+                        .map_err(|error| error.with_usage(usage));
                 }
                 None => return Err(ModelError::Network("unexpected end of response".into())),
             }
@@ -624,11 +631,8 @@ impl Anthropic {
                 self.redact(&format!("stream error: {data}")),
             )),
             "message_start" => {
-                if let Some(tokens) = value
-                    .pointer("/message/usage/input_tokens")
-                    .and_then(Value::as_u64)
-                {
-                    state.input_tokens = tokens;
+                if let Some(usage) = value.pointer("/message/usage") {
+                    state.usage.merge(anthropic_usage(usage));
                 }
                 Ok(true)
             }
@@ -641,11 +645,8 @@ impl Anthropic {
                 Ok(true)
             }
             "message_delta" => {
-                if let Some(tokens) = value
-                    .pointer("/usage/output_tokens")
-                    .and_then(Value::as_u64)
-                {
-                    state.output_tokens = tokens;
+                if let Some(usage) = value.get("usage") {
+                    state.usage.merge(anthropic_usage(usage));
                 }
                 Ok(true)
             }
@@ -694,11 +695,29 @@ impl Anthropic {
         Ok(Response {
             text,
             tool_calls: calls,
-            usage: Usage {
-                input_tokens: state.input_tokens,
-                output_tokens: state.output_tokens,
-            },
+            usage: state.usage,
         })
+    }
+}
+
+fn anthropic_usage(value: &Value) -> Usage {
+    let count = |key| value.get(key).and_then(Value::as_u64);
+    let uncached_input_tokens = count("input_tokens");
+    let cache_read_tokens = count("cache_read_input_tokens");
+    let cache_write_tokens = count("cache_creation_input_tokens");
+    Usage {
+        input_tokens: uncached_input_tokens.map(|input| {
+            input
+                .saturating_add(cache_read_tokens.unwrap_or_default())
+                .saturating_add(cache_write_tokens.unwrap_or_default())
+        }),
+        output_tokens: count("output_tokens"),
+        uncached_input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens: value
+            .pointer("/output_tokens_details/thinking_tokens")
+            .and_then(Value::as_u64),
     }
 }
 

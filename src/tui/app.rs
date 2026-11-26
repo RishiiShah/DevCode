@@ -156,6 +156,7 @@ pub struct App {
     pub context_window: Option<u64>,
     pub context_source: Option<&'static str>,
     pub capability_status: Option<String>,
+    pub token_status: Option<String>,
     pub context_used: u64,
     /// Git branch of the working folder, read at start and after each run.
     pub branch: Option<String>,
@@ -307,6 +308,7 @@ impl App {
             context_window: None,
             context_source: None,
             capability_status: None,
+            token_status: None,
             context_used: 0,
             branch: git_branch(),
             statusline: STATUSLINE_ITEMS
@@ -384,6 +386,7 @@ impl App {
                 self.items.push(Item::Info(format!("now using {label}")));
                 self.provider = label;
             }
+            Ev::TokenStatus(status) => self.token_status = status,
             Ev::Capabilities(window, source, status) => {
                 self.context_window = window;
                 self.context_source = source;
@@ -721,6 +724,9 @@ impl App {
         if let Some(status) = &self.capability_status {
             lines.push(format!("capabilities {status}"));
         }
+        if let Some(status) = &self.token_status {
+            lines.push(status.clone());
+        }
         lines
     }
 
@@ -872,6 +878,9 @@ impl App {
         self.run_in = 0;
         self.run_out = 0;
         // Verification details matter only when something changed.
+        if let Some(status) = crate::agent::token_ledger::summary(&result.token_ledger) {
+            self.items.push(Item::Note(status));
+        }
         let changed = result
             .summary
             .as_ref()
@@ -2403,6 +2412,7 @@ mod tests {
             last_input_tokens: 10,
             messages: Vec::new(),
             tool_outcomes: Default::default(),
+            token_ledger: Vec::new(),
             summary: Some(crate::discipline::TaskSummary {
                 steps: 3,
                 tokens_in: 10,
@@ -2517,6 +2527,7 @@ mod tests {
                     Message::assistant("done", Vec::new()),
                 ],
                 tool_outcomes: Default::default(),
+                token_ledger: Vec::new(),
                 scope: None,
                 total_in: 420,
                 total_out: 80,
@@ -2880,6 +2891,7 @@ mod tests {
             last_input_tokens: 1,
             messages: Vec::new(),
             tool_outcomes: Default::default(),
+            token_ledger: Vec::new(),
             summary: None,
             verification: None,
             no_progress: None,
@@ -3180,6 +3192,7 @@ mod tests {
             last_input_tokens: 0,
             messages: Vec::new(),
             tool_outcomes: Default::default(),
+            token_ledger: Vec::new(),
             summary: None,
             verification: None,
             no_progress: None,

@@ -524,9 +524,11 @@ impl CodeAssist {
                     while let Some(ev) = current {
                         match ev {
                             HttpEvent::Bytes(chunk) => {
-                                let proceed = parser.push(&chunk, &mut |_name, data| {
-                                    apply_ca_event(data, req, &mut state, on_chunk)
-                                })?;
+                                let proceed = parser
+                                    .push(&chunk, &mut |_name, data| {
+                                        apply_ca_event(data, req, &mut state, on_chunk)
+                                    })
+                                    .map_err(|error| error.with_usage(state.usage.clone()))?;
                                 if !proceed {
                                     done = true;
                                     break;
@@ -534,7 +536,8 @@ impl CodeAssist {
                             }
                             HttpEvent::Eof => break,
                             HttpEvent::Transport(err) => {
-                                return Err(ModelError::Network(Self::redact_token(&token, &err)));
+                                return Err(ModelError::Network(Self::redact_token(&token, &err))
+                                    .with_usage(state.usage));
                             }
                             HttpEvent::Format(err) => {
                                 return Err(ModelError::FormatError(Self::redact_token(
@@ -543,12 +546,16 @@ impl CodeAssist {
                             }
                             HttpEvent::Json(_) | HttpEvent::Status { .. } => break,
                         }
-                        current = rx.recv()?;
+                        current = rx
+                            .recv()
+                            .map_err(|error| error.with_usage(state.usage.clone()))?;
                     }
                     if !done {
-                        parser.finish(&mut |_name, data| {
-                            apply_ca_event(data, req, &mut state, on_chunk)
-                        })?;
+                        parser
+                            .finish(&mut |_name, data| {
+                                apply_ca_event(data, req, &mut state, on_chunk)
+                            })
+                            .map_err(|error| error.with_usage(state.usage.clone()))?;
                     }
                     state
                         .reasoning_tail
@@ -556,7 +563,8 @@ impl CodeAssist {
                     state
                         .text_tail
                         .finish(&mut |p| on_chunk(StreamChunk::Text(p)));
-                    return finish_ca_stream(state);
+                    let usage = state.usage.clone();
+                    return finish_ca_stream(state).map_err(|error| error.with_usage(usage));
                 }
                 None => return Err(ModelError::Network("unexpected end of response".into())),
             }
@@ -618,6 +626,7 @@ fn apply_ca_event(
     let value: Value =
         serde_json::from_str(trimmed).map_err(|e| ModelError::FormatError(e.to_string()))?;
     let resp = value.get("response").unwrap_or(&value);
+    state.usage.merge(gemini_usage(resp));
     if let Some(parts) = resp
         .pointer("/candidates/0/content/parts")
         .and_then(Value::as_array)
@@ -642,18 +651,6 @@ fn apply_ca_event(
             }
         }
     }
-    if let Some(prompt) = resp
-        .pointer("/usageMetadata/promptTokenCount")
-        .and_then(Value::as_u64)
-    {
-        state.usage.input_tokens = prompt;
-    }
-    if let Some(cand) = resp
-        .pointer("/usageMetadata/candidatesTokenCount")
-        .and_then(Value::as_u64)
-    {
-        state.usage.output_tokens = cand;
-    }
     Ok(true)
 }
 
@@ -672,6 +669,11 @@ fn finish_ca_stream(state: CaStreamState) -> Result<Response, ModelError> {
 }
 
 fn parse_ca_response(value: &Value, req: &Request) -> Result<Response, ModelError> {
+    parse_ca_response_inner(value, req)
+        .map_err(|error| error.with_usage(gemini_usage(value.get("response").unwrap_or(value))))
+}
+
+fn parse_ca_response_inner(value: &Value, req: &Request) -> Result<Response, ModelError> {
     let resp = value.get("response").unwrap_or(value);
     let parts = resp
         .pointer("/candidates/0/content/parts")
@@ -698,17 +700,28 @@ fn parse_ca_response(value: &Value, req: &Request) -> Result<Response, ModelErro
     Ok(Response {
         text,
         tool_calls: calls,
-        usage: Usage {
-            input_tokens: resp
-                .pointer("/usageMetadata/promptTokenCount")
-                .and_then(Value::as_u64)
-                .unwrap_or_default(),
-            output_tokens: resp
-                .pointer("/usageMetadata/candidatesTokenCount")
-                .and_then(Value::as_u64)
-                .unwrap_or_default(),
-        },
+        usage: gemini_usage(resp),
     })
+}
+
+fn gemini_usage(response: &Value) -> Usage {
+    let value = response.get("usageMetadata").unwrap_or(&Value::Null);
+    let count = |key| value.get(key).and_then(Value::as_u64);
+    let input_tokens = count("promptTokenCount")
+        .map(|prompt| prompt.saturating_add(count("toolUsePromptTokenCount").unwrap_or_default()));
+    let cache_read_tokens = count("cachedContentTokenCount");
+    let reasoning_tokens = count("thoughtsTokenCount");
+    Usage {
+        input_tokens,
+        output_tokens: count("candidatesTokenCount")
+            .map(|output| output.saturating_add(reasoning_tokens.unwrap_or_default())),
+        uncached_input_tokens: input_tokens
+            .zip(cache_read_tokens)
+            .and_then(|(input, read)| input.checked_sub(read)),
+        cache_read_tokens,
+        cache_write_tokens: None,
+        reasoning_tokens,
+    }
 }
 
 fn parse_function_call(

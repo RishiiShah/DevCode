@@ -77,15 +77,19 @@ fn server(response: &'static str) -> String {
 #[test]
 fn parses_tool_call() {
     let url = server(
-        r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"1","function":{"name":"read","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#,
+        r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"1","function":{"name":"read","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":1},"completion_tokens_details":{"reasoning_tokens":2}}}"#,
     );
     let result = OpenAiCompat::new(config(url))
         .unwrap()
         .complete(&request())
         .unwrap();
     assert_eq!(result.tool_calls[0].name, "read");
-    assert_eq!(result.usage.input_tokens, 2);
-    assert_eq!(result.usage.output_tokens, 3);
+    let usage = serde_json::to_value(&result.usage).unwrap();
+    assert_eq!(usage["input_tokens"], 2);
+    assert_eq!(usage["cache_read_tokens"], 1);
+    assert_eq!(usage["reasoning_tokens"], 2);
+    assert!(usage["cache_write_tokens"].is_null());
+    assert_eq!(result.usage.output_tokens, Some(3));
 }
 #[test]
 fn rejects_invalid_arguments() {

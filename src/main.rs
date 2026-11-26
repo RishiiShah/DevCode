@@ -38,6 +38,9 @@ fn handle_plain_slash(line: &str, session: &mut devcode::Session) -> bool {
             if let Some(status) = session.capability_status() {
                 println!("{status}");
             }
+            if let Some(status) = session.token_status() {
+                println!("{status}");
+            }
             true
         }
         "/provider" => {
@@ -153,6 +156,9 @@ fn print_result(result: &LoopResult) {
     }
     if let Some(summary) = &result.summary {
         println!("{}", summary.format_line());
+    }
+    if let Some(status) = devcode::agent::token_ledger::summary(&result.token_ledger) {
+        println!("{status}");
     }
     if let Some((path, count)) = &result.no_progress {
         eprintln!("no progress: {} repeated {} times", path, count);

@@ -207,8 +207,8 @@ fn stream_usage_and_text_deltas() {
         vec!["Hello".to_string(), " ".to_string(), "world".to_string()]
     );
     assert_eq!(response.text.as_deref(), Some("Hello world"));
-    assert_eq!(response.usage.input_tokens, 12);
-    assert_eq!(response.usage.output_tokens, 4);
+    assert_eq!(response.usage.input_tokens, Some(12));
+    assert_eq!(response.usage.output_tokens, Some(4));
     let captured = requests.lock().unwrap();
     let raw = String::from_utf8_lossy(&captured[0]);
     let headers = raw.split("\r\n\r\n").next().unwrap().to_ascii_lowercase();
@@ -573,8 +573,8 @@ fn stream_json_content_type_skips_callbacks() {
         .unwrap();
     assert_eq!(*calls.lock().unwrap(), 0);
     assert_eq!(response.text.as_deref(), Some("plain"));
-    assert_eq!(response.usage.input_tokens, 2);
-    assert_eq!(response.usage.output_tokens, 3);
+    assert_eq!(response.usage.input_tokens, Some(2));
+    assert_eq!(response.usage.output_tokens, Some(3));
 }
 
 #[test]

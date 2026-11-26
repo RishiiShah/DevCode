@@ -8,6 +8,7 @@ pub enum ToolKind {
     RunCommand,
     DependencyJustification,
     OutsideScope,
+    ModelCall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +32,31 @@ impl ToolLog {
         Self {
             entries: Vec::new(),
             test_workspace_hash: None,
+        }
+    }
+
+    pub(crate) fn record_model_call(&mut self, row: &mut crate::agent::token_ledger::LedgerEntry) {
+        let order = self.entries.len() + 1;
+        row.tool_log_order = Some(order);
+        self.entries.push(ToolLogEntry {
+            order,
+            kind: ToolKind::ModelCall,
+            detail: serde_json::to_string(row)
+                .expect("ledger rows contain only serializable fields"),
+            exit_code: None,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_millis() as u64),
+        });
+    }
+
+    pub(crate) fn update_model_call(&mut self, row: &crate::agent::token_ledger::LedgerEntry) {
+        if let Some(entry) = row
+            .tool_log_order
+            .and_then(|order| self.entries.get_mut(order - 1))
+        {
+            entry.detail =
+                serde_json::to_string(row).expect("ledger rows contain only serializable fields");
         }
     }
 

@@ -158,7 +158,7 @@ fn code_assist_onboards_streams_reasoning_and_tool_calls() {
                                 ]
                             }
                         }],
-                        "usageMetadata": {"promptTokenCount": 21, "candidatesTokenCount": 9}
+                        "usageMetadata": {"promptTokenCount": 21, "candidatesTokenCount": 9, "cachedContentTokenCount": 4, "thoughtsTokenCount": 3}
                     }
                 }),
             ],
@@ -192,8 +192,11 @@ fn code_assist_onboards_streams_reasoning_and_tool_calls() {
         resp.tool_calls[0].thought_signature.as_deref(),
         Some("sig-9")
     );
-    assert_eq!(resp.usage.input_tokens, 21);
-    assert_eq!(resp.usage.output_tokens, 9);
+    assert_eq!(resp.usage.input_tokens, Some(21));
+    let usage = serde_json::to_value(&resp.usage).unwrap();
+    assert_eq!(usage["cache_read_tokens"], 4);
+    assert_eq!(usage["reasoning_tokens"], 3);
+    assert_eq!(usage["output_tokens"], 12);
 
     // Project ID was cached to oauth-gemini.json.
     assert_eq!(

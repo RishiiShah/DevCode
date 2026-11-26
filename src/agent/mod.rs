@@ -6,6 +6,7 @@ pub mod openai_compat;
 pub mod scripted;
 pub mod session;
 pub mod sse;
+pub mod token_ledger;
 pub mod tool;
 
 pub use loop_runner::{

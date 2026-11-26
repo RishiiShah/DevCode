@@ -112,8 +112,9 @@ fn response(calls: Vec<ToolCall>) -> Result<Response, devcode::agent::ModelError
         text: Some("secret-response".into()),
         tool_calls: calls,
         usage: Usage {
-            input_tokens: 7,
-            output_tokens: 3,
+            input_tokens: Some(7),
+            output_tokens: Some(3),
+            ..Usage::default()
         },
     })
 }

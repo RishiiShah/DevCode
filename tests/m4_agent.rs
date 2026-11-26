@@ -54,16 +54,18 @@ fn test_normal_run_ends_on_no_tool_response() {
                 arguments: "hello".to_string(),
             }],
             usage: Usage {
-                input_tokens: 100,
-                output_tokens: 20,
+                input_tokens: Some(100),
+                output_tokens: Some(20),
+                ..Usage::default()
             },
         }),
         Ok(Response {
             text: Some("Final answer: hello".to_string()),
             tool_calls: Vec::new(),
             usage: Usage {
-                input_tokens: 150,
-                output_tokens: 30,
+                input_tokens: Some(150),
+                output_tokens: Some(30),
+                ..Usage::default()
             },
         }),
     ];
@@ -100,16 +102,18 @@ fn test_tool_error_becomes_observation_not_crash() {
                 arguments: "{}".to_string(),
             }],
             usage: Usage {
-                input_tokens: 50,
-                output_tokens: 10,
+                input_tokens: Some(50),
+                output_tokens: Some(10),
+                ..Usage::default()
             },
         }),
         Ok(Response {
             text: Some("Handled failure gracefully".to_string()),
             tool_calls: Vec::new(),
             usage: Usage {
-                input_tokens: 80,
-                output_tokens: 20,
+                input_tokens: Some(80),
+                output_tokens: Some(20),
+                ..Usage::default()
             },
         }),
     ];
@@ -154,8 +158,9 @@ fn test_step_limit_ends_run_with_matching_reason() {
                 arguments: "".to_string(),
             }],
             usage: Usage {
-                input_tokens: 10,
-                output_tokens: 5,
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                ..Usage::default()
             },
         }));
     }
@@ -172,6 +177,7 @@ fn test_step_limit_ends_run_with_matching_reason() {
         cancel: None,
         history: Vec::new(),
         steer: None,
+        token_ledger: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -194,8 +200,9 @@ fn test_wall_time_limit_ends_run_with_matching_reason() {
             arguments: "".to_string(),
         }],
         usage: Usage {
-            input_tokens: 10,
-            output_tokens: 5,
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            ..Usage::default()
         },
     })];
 
@@ -212,6 +219,7 @@ fn test_wall_time_limit_ends_run_with_matching_reason() {
         cancel: None,
         history: Vec::new(),
         steer: None,
+        token_ledger: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -241,6 +249,7 @@ fn test_consecutive_format_errors_limit_ends_run() {
         cancel: None,
         history: Vec::new(),
         steer: None,
+        token_ledger: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -261,16 +270,18 @@ fn test_token_totals_equal_scripted_usage() {
                 arguments: "".to_string(),
             }],
             usage: Usage {
-                input_tokens: 1234,
-                output_tokens: 567,
+                input_tokens: Some(1234),
+                output_tokens: Some(567),
+                ..Usage::default()
             },
         }),
         Ok(Response {
             text: Some("Done".to_string()),
             tool_calls: Vec::new(),
             usage: Usage {
-                input_tokens: 4321,
-                output_tokens: 765,
+                input_tokens: Some(4321),
+                output_tokens: Some(765),
+                ..Usage::default()
             },
         }),
     ];

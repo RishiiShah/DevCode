@@ -70,6 +70,7 @@ pub struct Session {
     title: String,
     /// Persisted per-tool outcomes (`ok`, optional `diff`) and usage for resume fidelity.
     tool_outcomes: std::collections::BTreeMap<String, agent::ToolOutcome>,
+    token_ledger: Vec<agent::token_ledger::LedgerEntry>,
     total_in: u64,
     total_out: u64,
     context_used: u64,
@@ -139,6 +140,7 @@ impl Session {
             conversation: conversation::new_id(),
             title: String::new(),
             tool_outcomes: Default::default(),
+            token_ledger: Vec::new(),
             total_in: 0,
             total_out: 0,
             context_used: 0,
@@ -194,6 +196,7 @@ impl Session {
             self.model
                 .set_stream_usage(record.values.streaming_usage != Some(false));
         }
+        let token_ledger = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let limits = agent::LoopLimits {
             history: self.history.clone(),
             context_window: self.context_window(),
@@ -205,6 +208,7 @@ impl Session {
                     .is_none_or(|c| c.values.streaming != Some(false)),
             cancel: Some(self.cancel.clone()),
             steer: Some(self.steer.clone()),
+            token_ledger: Some(token_ledger.clone()),
             ..Default::default()
         };
         let result = agent::run_agent_with_config(
@@ -226,6 +230,18 @@ impl Session {
                 self.log_stream_usage_downgrade(provider);
             }
         }
+        if let Ok(mut rows) = token_ledger.lock() {
+            for row in rows.iter() {
+                if let Some(input) = row.reported.input_tokens {
+                    self.total_in = self.total_in.saturating_add(input);
+                    self.context_used = input;
+                }
+                if let Some(output) = row.reported.output_tokens {
+                    self.total_out = self.total_out.saturating_add(output);
+                }
+            }
+            self.token_ledger.append(&mut rows);
+        }
         match &result {
             Ok(run) => {
                 self.history = run.messages.clone();
@@ -234,11 +250,6 @@ impl Session {
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone())),
                 );
-                self.total_in = self.total_in.saturating_add(run.total_input_tokens);
-                self.total_out = self.total_out.saturating_add(run.total_output_tokens);
-                if run.last_input_tokens > 0 {
-                    self.context_used = run.last_input_tokens;
-                }
             }
             Err(e) => {
                 // The run's own messages are lost with the error; keep the request and the
@@ -270,6 +281,7 @@ impl Session {
                 total_in: self.total_in,
                 total_out: self.total_out,
                 context_used: self.context_used,
+                token_ledger: self.token_ledger.clone(),
             },
             self.tools.scope_snapshot(),
         );
@@ -281,6 +293,7 @@ impl Session {
         self.conversation = conversation::new_id();
         self.title.clear();
         self.tool_outcomes.clear();
+        self.token_ledger.clear();
         self.total_in = 0;
         self.total_out = 0;
         self.context_used = 0;
@@ -480,6 +493,7 @@ impl Session {
         self.conversation = loaded.id.clone();
         self.title = loaded.title.clone();
         self.tool_outcomes = loaded.tool_outcomes.clone();
+        self.token_ledger.clone_from(&loaded.token_ledger);
         self.total_in = loaded.total_in;
         self.total_out = loaded.total_out;
         self.context_used = loaded.context_used;
@@ -557,6 +571,10 @@ impl Session {
             .sources
             .get("context_window")
             .copied()
+    }
+
+    pub fn token_status(&self) -> Option<String> {
+        agent::token_ledger::summary(&self.token_ledger)
     }
 
     pub fn capability_status(&self) -> Option<String> {

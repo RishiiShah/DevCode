@@ -17,8 +17,9 @@ fn response(calls: Vec<ToolCall>) -> Result<Response, ModelError> {
         text: Some("done".into()),
         tool_calls: calls,
         usage: Usage {
-            input_tokens: 2,
-            output_tokens: 1,
+            input_tokens: Some(2),
+            output_tokens: Some(1),
+            ..Usage::default()
         },
     })
 }

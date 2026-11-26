@@ -80,6 +80,28 @@ impl ToolRegistry {
         Some(f(&mut ctx.processes, &mut ctx.log))
     }
 
+    pub(crate) fn checkpoint_cursor(&self) -> Option<usize> {
+        Some(self.context.as_ref()?.lock().ok()?.step)
+    }
+
+    pub(crate) fn checkpoint_since(
+        &self,
+        previous: Option<usize>,
+    ) -> Option<crate::agent::token_ledger::LedgerEvent> {
+        let context = self.context.as_ref()?.lock().ok()?;
+        if context.step <= previous? {
+            return None;
+        }
+        let path = crate::state::manifests_dir(&context.root)
+            .join(&context.session)
+            .join(format!("{}.json", context.step));
+        path.is_file()
+            .then(|| crate::agent::token_ledger::LedgerEvent::Checkpoint {
+                session: context.session.clone(),
+                step: context.step,
+            })
+    }
+
     pub(crate) fn scope_snapshot(&self) -> Option<crate::discipline::ScopeState> {
         let context = self.context.as_ref()?.lock().ok()?;
         let scope = context.scope.state.lock().ok()?.clone();

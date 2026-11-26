@@ -54,6 +54,7 @@ pub enum Ev {
     Provider(String, Option<u64>),
     /// Source of the active context window (`config`, `model`, `default`).
     Capabilities(Option<u64>, Option<&'static str>, Option<String>),
+    TokenStatus(Option<String>),
     Models(Result<Vec<String>, String>),
     /// Effort values the current model accepts (empty: none).
     Efforts(Vec<String>),
@@ -142,6 +143,7 @@ pub fn spawn(
         while let Ok(cmd) = commands.recv() {
             handle(&mut session, &cli, cmd, &events);
             let _ = events.send(Ev::Processes(session.running_processes()));
+            let _ = events.send(Ev::TokenStatus(session.token_status()));
         }
     })
 }

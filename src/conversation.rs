@@ -3,7 +3,7 @@
 //! project, and opencode keeps sessions in its data dir; DevCode keeps one JSON file per
 //! conversation in the project's state dir (`crate::state`).
 
-use crate::agent::{Message, Role, ToolOutcome};
+use crate::agent::{token_ledger::LedgerEntry, Message, Role, ToolOutcome};
 use crate::discipline::ScopeState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,6 +28,8 @@ struct Saved {
     total_out: u64,
     #[serde(default)]
     context_used: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    token_ledger: Vec<LedgerEntry>,
 }
 
 /// Full conversation payload restored on resume.
@@ -41,14 +43,16 @@ pub struct LoadedConversation {
     pub total_in: u64,
     pub total_out: u64,
     pub context_used: u64,
+    pub token_ledger: Vec<LedgerEntry>,
 }
 
 /// Token counters persisted with a conversation for `/status` and the status line on resume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConversationUsage {
     pub total_in: u64,
     pub total_out: u64,
     pub context_used: u64,
+    pub token_ledger: Vec<LedgerEntry>,
 }
 
 /// One saved conversation, newest first in `list`.
@@ -145,6 +149,7 @@ pub(crate) fn save_with_scope(
         total_in: usage.total_in,
         total_out: usage.total_out,
         context_used: usage.context_used,
+        token_ledger: usage.token_ledger,
     };
     let json = serde_json::to_vec(&saved).map_err(std::io::Error::other)?;
     let tmp = dir.join(format!("{id}.{}.json.tmp", std::process::id()));
@@ -203,6 +208,7 @@ pub fn load_full(root: &Path, id: &str) -> std::io::Result<LoadedConversation> {
         total_in: saved.total_in,
         total_out: saved.total_out,
         context_used: saved.context_used,
+        token_ledger: saved.token_ledger,
     })
 }
 

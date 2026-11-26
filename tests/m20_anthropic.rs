@@ -110,7 +110,7 @@ fn request_headers_and_defaults() {
 
 #[test]
 fn parses_tool_use() {
-    let reply = r#"{"content":[{"type":"tool_use","id":"tu_1","name":"read","input":{"path":"src/lib.rs"}}],"usage":{"input_tokens":3,"output_tokens":4}}"#;
+    let reply = r#"{"content":[{"type":"tool_use","id":"tu_1","name":"read","input":{"path":"src/lib.rs"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":7,"output_tokens":4,"output_tokens_details":{"thinking_tokens":0}}}"#;
     let (url, _) = scripted_server(vec![(200, reply.into())]);
     let response = Anthropic::new(config(url))
         .unwrap()
@@ -123,8 +123,12 @@ fn parses_tool_use() {
         serde_json::from_str::<serde_json::Value>(&response.tool_calls[0].arguments).unwrap(),
         serde_json::json!({"path": "src/lib.rs"})
     );
-    assert_eq!(response.usage.input_tokens, 3);
-    assert_eq!(response.usage.output_tokens, 4);
+    let usage = serde_json::to_value(&response.usage).unwrap();
+    assert_eq!(usage["input_tokens"], 15);
+    assert_eq!(usage["cache_read_tokens"], 5);
+    assert_eq!(usage["cache_write_tokens"], 7);
+    assert_eq!(usage["reasoning_tokens"], 0);
+    assert_eq!(response.usage.output_tokens, Some(4));
 }
 
 #[test]
@@ -206,7 +210,10 @@ fn missing_message_content_is_format_error() {
         Anthropic::new(config(url))
             .unwrap()
             .complete(&tool_request()),
-        Err(ModelError::FormatError(_))
+        Err(ModelError::WithUsage { error, usage })
+            if matches!(*error, ModelError::FormatError(_))
+                && usage.input_tokens == Some(0)
+                && usage.output_tokens == Some(0)
     ));
     let (url, _) = scripted_server(vec![(200, r#"{"content":[]}"#.into())]);
     assert!(matches!(

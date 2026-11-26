@@ -85,9 +85,26 @@ pub struct ToolSchema {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub uncached_input_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+}
+
+impl Usage {
+    /// Providers may send partial cumulative usage across multiple stream events.
+    pub(crate) fn merge(&mut self, latest: Self) {
+        self.input_tokens = latest.input_tokens.or(self.input_tokens);
+        self.output_tokens = latest.output_tokens.or(self.output_tokens);
+        self.uncached_input_tokens = latest.uncached_input_tokens.or(self.uncached_input_tokens);
+        self.cache_read_tokens = latest.cache_read_tokens.or(self.cache_read_tokens);
+        self.cache_write_tokens = latest.cache_write_tokens.or(self.cache_write_tokens);
+        self.reasoning_tokens = latest.reasoning_tokens.or(self.reasoning_tokens);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +125,10 @@ pub struct Response {
 #[derive(Debug)]
 pub enum ModelError {
     FormatError(String),
+    WithUsage {
+        error: Box<ModelError>,
+        usage: Box<Usage>,
+    },
     Network(String),
     EmptyScript,
     RateLimited,
@@ -118,12 +139,26 @@ pub enum ModelError {
 impl fmt::Display for ModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ModelError::WithUsage { error, .. } => error.fmt(f),
             ModelError::FormatError(msg) => write!(f, "model format error: {}", msg),
             ModelError::Network(msg) => write!(f, "model network error: {}", msg),
             ModelError::RateLimited => write!(f, "rate limited"),
             ModelError::Cancelled => write!(f, "request cancelled"),
             ModelError::EmptyScript => write!(f, "scripted model has no remaining responses"),
             ModelError::Other(msg) => write!(f, "model error: {}", msg),
+        }
+    }
+}
+
+impl ModelError {
+    pub(crate) fn with_usage(self, usage: Usage) -> Self {
+        if usage == Usage::default() {
+            self
+        } else {
+            Self::WithUsage {
+                error: Box::new(self),
+                usage: Box::new(usage),
+            }
         }
     }
 }

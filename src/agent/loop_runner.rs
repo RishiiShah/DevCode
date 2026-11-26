@@ -1,4 +1,5 @@
 use crate::agent::model::{CancelToken, Message, Model, ModelError, Request, Role, StreamChunk};
+use crate::agent::token_ledger::{InputEstimate, LedgerEntry, LedgerEvent};
 use crate::agent::tool::ToolRegistry;
 use crate::discipline::summary::TaskSummary;
 use crate::profile::Profile;
@@ -131,6 +132,8 @@ pub struct LoopLimits {
     /// Earlier turns of the conversation; the new user message is appended to them.
     pub history: Vec<Message>,
     pub steer: Option<SteerInbox>,
+    /// Captures calls even if the run exits with an error.
+    pub token_ledger: Option<std::sync::Arc<std::sync::Mutex<Vec<LedgerEntry>>>>,
 }
 
 impl LoopLimits {
@@ -174,6 +177,7 @@ impl Default for LoopLimits {
             cancel: None,
             history: Vec::new(),
             steer: None,
+            token_ledger: None,
         }
     }
 }
@@ -195,6 +199,7 @@ pub struct LoopResult {
     pub last_input_tokens: u64,
     pub messages: Vec<Message>,
     pub tool_outcomes: std::collections::BTreeMap<String, ToolOutcome>,
+    pub token_ledger: Vec<LedgerEntry>,
     pub summary: Option<TaskSummary>,
     pub verification: Option<String>,
     pub no_progress: Option<(String, usize)>,
@@ -253,10 +258,11 @@ fn run_loop(
         .map(|s| s.log.entries.len())
         .unwrap_or(0);
     let mut steps = 0;
-    let mut total_input_tokens = 0;
-    let mut total_output_tokens = 0;
+    let mut total_input_tokens = 0u64;
+    let mut total_output_tokens = 0u64;
     let mut last_input_tokens = 0;
     let mut tool_outcomes = std::collections::BTreeMap::new();
+    let mut token_ledger = Vec::new();
     let mut consecutive_format_errors = 0;
     let start_time = Instant::now();
 
@@ -295,6 +301,7 @@ fn run_loop(
             tools: tool_schemas.clone(),
         };
 
+        let estimated = InputEstimate::for_request(&req);
         let step_start = Instant::now();
         limits.emit(ProgressEvent::Thinking { step: steps + 1 });
         let mut network_retries = 0;
@@ -325,6 +332,35 @@ fn run_loop(
             } else {
                 model.complete_cancellable(&req, limits.cancel.as_ref())
             };
+            let (attempt, reported) = match attempt {
+                Ok(response) => {
+                    let usage = response.usage.clone();
+                    (Ok(response), usage)
+                }
+                Err(ModelError::WithUsage { error, usage }) => (Err(*error), *usage),
+                Err(error) => (Err(error), Default::default()),
+            };
+            total_input_tokens =
+                total_input_tokens.saturating_add(reported.input_tokens.unwrap_or_default());
+            total_output_tokens =
+                total_output_tokens.saturating_add(reported.output_tokens.unwrap_or_default());
+            if let Some(input) = reported.input_tokens {
+                last_input_tokens = input;
+            }
+            let mut row = LedgerEntry {
+                reported,
+                estimated: estimated.clone(),
+                completed: attempt.is_ok(),
+                tool_log_order: None,
+                events: Vec::new(),
+            };
+            tools.with_processes(|_, log| log.record_model_call(&mut row));
+            if let Some(ledger) = &limits.token_ledger {
+                if let Ok(mut rows) = ledger.lock() {
+                    rows.push(row.clone());
+                }
+            }
+            token_ledger.push(row);
             match attempt {
                 Err(ModelError::Network(reason))
                     if network_retries < NETWORK_RETRIES && retryable_network_error(&reason) =>
@@ -368,6 +404,20 @@ fn run_loop(
             Err(e) => return Err(e),
         };
 
+        let mut mark_event = |event| {
+            if let Some(row) = token_ledger.last_mut() {
+                row.events.push(event);
+                tools.with_processes(|_, log| log.update_model_call(row));
+                if let Some(ledger) = &limits.token_ledger {
+                    if let Ok(mut rows) = ledger.lock() {
+                        if let Some(saved) = rows.last_mut() {
+                            saved.clone_from(row);
+                        }
+                    }
+                }
+            }
+        };
+
         if let Some(text) = &mut response.text {
             *text = model.redact_sensitive(text);
         }
@@ -375,9 +425,6 @@ fn run_loop(
             call.arguments = model.redact_sensitive(&call.arguments);
         }
         let model_time = step_start.elapsed();
-        total_input_tokens += response.usage.input_tokens;
-        total_output_tokens += response.usage.output_tokens;
-        last_input_tokens = response.usage.input_tokens;
         steps += 1;
         limits.emit(ProgressEvent::Usage {
             input: total_input_tokens,
@@ -434,6 +481,9 @@ fn run_loop(
                         {
                             let reason = "Workspace changed since the test command ran. Run the test command again.";
                             verification = Some(format!("Verification Summary: {}", reason));
+                            mark_event(LedgerEvent::Gate {
+                                outcome: "stale".into(),
+                            });
                             messages.push(Message::user(reason));
                             continue;
                         }
@@ -447,18 +497,29 @@ fn run_loop(
                         None,
                         "",
                     ) {
-                        Ok(summary) => verification = Some(summary.to_string()),
+                        Ok(summary) => {
+                            verification = Some(summary.to_string());
+                            mark_event(LedgerEvent::Gate {
+                                outcome: "passed".into(),
+                            });
+                        }
                         // No test command configured: the model cannot satisfy the gate, so
                         // finish honestly as unverified instead of looping until the step limit.
                         Err(crate::gate::GateError::TestCommandNotRun)
                             if config.verification.test_command.is_none() =>
                         {
+                            mark_event(LedgerEvent::Gate {
+                                outcome: "unverified".into(),
+                            });
                             verification = Some(
                                 "Verification Summary: UNVERIFIED. No test command is configured, so these changes were not tested. Set verification.test_command in .devcode.json."
                                     .to_string(),
                             );
                         }
                         Err(e) => {
+                            mark_event(LedgerEvent::Gate {
+                                outcome: "blocked".into(),
+                            });
                             verification = Some(format!("Verification Summary: {}", e));
                             messages.push(Message::user(format!("Verification blocked: {}", e)));
                             continue;
@@ -533,7 +594,12 @@ fn run_loop(
                 format!("Run the configured test command first: {}. This records whether the problem reproduces.", cmd)
             } else {
                 tools.take_diff();
-                match tools.execute(call) {
+                let checkpoint_before = tools.checkpoint_cursor();
+                let result = tools.execute(call);
+                if let Some(event) = tools.checkpoint_since(checkpoint_before) {
+                    mark_event(event);
+                }
+                match result {
                     Ok(output) => output,
                     Err(err) => {
                         tool_ok = false;
@@ -651,7 +717,8 @@ fn run_loop(
                 response
                     .usage
                     .input_tokens
-                    .saturating_add(response.usage.output_tokens),
+                    .unwrap_or_default()
+                    .saturating_add(response.usage.output_tokens.unwrap_or_default()),
                 window,
             ) {
                 let state = crate::agent::session::session_state(tools)?;
@@ -712,6 +779,7 @@ fn run_loop(
         last_input_tokens,
         messages,
         tool_outcomes,
+        token_ledger,
         summary: Some(summary),
         verification,
         no_progress,
