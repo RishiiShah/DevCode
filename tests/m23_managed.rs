@@ -65,9 +65,8 @@ fn startup_failure_reports_exit_and_never_claims_ready() {
     assert!(err.contains("exited before"), "{err}");
     assert!(err.contains("exit code 3"), "{err}");
     assert!(err.contains("boom"), "{err}");
-    assert!(!dir
-        .path()
-        .join(".devcode/managed/proc-1.before.json")
+    assert!(!devcode::state::dir(dir.path())
+        .join("managed/proc-1.before.json")
         .exists());
 }
 
@@ -146,9 +145,8 @@ fn ready_server_stays_available_until_stop() {
     let stopped = call(&tools, "stop_process", serde_json::json!({"id": "proc-1"})).unwrap();
     assert!(stopped.contains("stopped"), "{stopped}");
     assert!(!port_open(port));
-    assert!(!dir
-        .path()
-        .join(".devcode/managed/proc-1.before.json")
+    assert!(!devcode::state::dir(dir.path())
+        .join("managed/proc-1.before.json")
         .exists());
 }
 
@@ -167,7 +165,7 @@ fn stop_reconciles_file_changes_made_while_running() {
         dir.path().join("made.txt").exists(),
         "reconcile must not roll back"
     );
-    assert!(dir.path().join(".devcode/manifests").exists());
+    assert!(devcode::state::dir(dir.path()).join("manifests").exists());
 }
 
 #[test]

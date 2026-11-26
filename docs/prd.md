@@ -4,7 +4,7 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1001-PRD
-REVISION       : 0.4.1-draft
+REVISION       : 0.4.2-draft
 STATUS         : Working Draft (Engineering Specification)
 AUTHOR         : DevCode Product Architecture Group
 OWNS           : Requirements (what): FR-1..6, NFR-1..9, Gates 1..8.
@@ -53,14 +53,14 @@ Design: ATE-1000-ARCH. Codebase indexing and security tooling: ATE-1002-CBU.
   - Class B (empty in v1): a future AST-proven refactor requires all applicable existing tests green. Class C: formatting/lint checks suffice.
   - Only an explicit user flag or instruction identifying the bypass authorizes an audited exception. Run all remaining gates; a warning or model instruction is not authorization.
   - Bind results to the checked diff hash and invalidate affected checks after later edits.
-- **FR-2.3 (Audit Ledger & Truncation Anchor)**: Record each bypass in append-only `.devcode/audit.log` (timestamp, user authorization, skipped checks, reason, diff SHA, `prev_entry_sha`). Anchor the tail outside the workspace (user state dir and, with Git, `refs/devcode/audit-tail`). Validate chain, count, and anchor at session start and before finalization; deletion, truncation, or mismatch blocks finalization. Mechanism and error codes: ARCH §5.2.
+- **FR-2.3 (Audit Ledger & Truncation Anchor)**: Record each bypass in append-only `audit.log` in the project state dir (ARCH §4.3) (timestamp, user authorization, skipped checks, reason, diff SHA, `prev_entry_sha`). Anchor the tail outside the workspace (user state dir and, with Git, `refs/devcode/audit-tail`). Validate chain, count, and anchor at session start and before finalization; deletion, truncation, or mismatch blocks finalization. Mechanism and error codes: ARCH §5.2.
 - **FR-2.4 (Policy Integrity)**: Proposed changes to gate commands, test discovery, or classification rules are checked against user-approved pre-step policy. They cannot exempt themselves or take effect before explicit user acceptance.
 
 ### FR-3: Safe Step-Manifest Checkpointing & Rollback
 Mechanism: ARCH §4 (rollback), §6.4 (shell).
 - **FR-3.1**: Before any path mutation, persist pre-step existence, type, exact bytes or symlink target, permissions, and hash. A hash alone is insufficient. `HEAD` is optional diagnostic metadata. Block the write if capture fails.
 - **FR-3.2 (Mutation Manifests & Shell Write Policy)**:
-  - Publish mutation records under `.devcode/manifests/<session_id>/<step_id>.json` before any file-tool write; record post-step state for conflict detection.
+  - Publish mutation records under `<state>/manifests/<session_id>/<step_id>.json` (ARCH §4.3) before any file-tool write; record post-step state for conflict detection.
   - Dedicated file tools (`write_file`, `edit_file`, `patch`) are the sole authorized path for agent source and configuration edits.
   - Shell subprocesses (`run_command`) may write derived build artifacts, compiler outputs, and temp files in the workspace; blocking them would freeze `cargo build`, `npm test`, `pytest`, `make`, `dotnet`. Rationale: ARCH §6.4.1.
   - Lexical guarding with heredoc stripping denies shell commands and redirections targeting `.devcode/` or tracked source files before execution (ARCH §6.4.3).
@@ -106,7 +106,7 @@ Every NFR has a reproducible recipe. NFR-5 applies only after Tier 2 is enabled;
 | NFR-4 | Tool context per turn | <= 6,000 tokens | Hard ceiling on file slices and ripgrep results ingested into a model turn. |
 | NFR-5 | Tier 2 PageRank compute | <= 2.0 s | Wall-clock to parse 500 files and compute Personalized PageRank. |
 | NFR-6 | Rollback fidelity | 100% bit-for-bit parity on captured paths | SHA-256 comparison of uncommitted touched files before vs after rollback. Covers bytes, type, and POSIX mode or Windows attributes; ACLs out of scope. |
-| NFR-7 | Checkpoint disk ceiling | <= 50 MB (auto-pruned at 7 days) | Measure `.devcode/manifests` usage across 50 consecutive interactive runs. |
+| NFR-7 | Checkpoint disk ceiling | <= 50 MB (auto-pruned at 7 days) | Measure `<state>/manifests` and `<state>/blobs` usage across 50 consecutive interactive runs. |
 | NFR-8 | Sandbox kill watchdog | <= 100 ms to terminate runaway children | Launch a runaway child; verify `kill(-pgid)` on POSIX or Job Object close on Windows leaves 0 orphans. |
 | NFR-9 | Shell snapshot overhead | Incremental <= 250 ms; first <= 2 s (targets, unmeasured) | Run a no-op mutation-capable command on the reference repo; time snapshot and reconcile, warm and cold. |
 

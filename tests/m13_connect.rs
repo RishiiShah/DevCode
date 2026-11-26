@@ -275,6 +275,6 @@ fn tty_connect_rebuilds_provider_for_next_request() {
         "settings.json should remember the connected provider, got: {settings}"
     );
     assert!(!visible.contains("synthetic-secret-M13"));
-    let trace = fs::read_to_string(root.path().join(".devcode/trace.jsonl")).unwrap();
+    let trace = fs::read_to_string(devcode::state::dir(root.path()).join("trace.jsonl")).unwrap();
     assert!(!trace.contains("synthetic-secret-M13"));
 }

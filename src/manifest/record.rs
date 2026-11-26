@@ -157,8 +157,7 @@ pub fn record_post(
 }
 
 pub fn save_manifest(root: &Path, manifest: &StepManifest) -> Result<(), ManifestError> {
-    let manifest_dir = root
-        .join(".devcode")
+    let manifest_dir = crate::state::dir(root)
         .join("manifests")
         .join(&manifest.session_id);
     fs::create_dir_all(&manifest_dir).map_err(ManifestError::Storage)?;
@@ -184,8 +183,7 @@ pub fn load_manifest(
     session_id: &str,
     step_id: usize,
 ) -> Result<StepManifest, ManifestError> {
-    let manifest_path = root
-        .join(".devcode")
+    let manifest_path = crate::state::dir(root)
         .join("manifests")
         .join(session_id)
         .join(format!("{}.json", step_id));

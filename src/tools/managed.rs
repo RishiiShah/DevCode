@@ -399,7 +399,7 @@ fn start(
 
     processes.next_id += 1;
     let id = format!("proc-{}", processes.next_id);
-    let dir = root.join(".devcode/managed");
+    let dir = crate::state::dir(root).join("managed");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let log_path = dir.join(format!("{id}.log"));
     let before_path = dir.join(format!("{id}.before.json"));

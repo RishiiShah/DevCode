@@ -166,17 +166,13 @@ fn summary_counts_trace_and_gitignore() {
     assert!(summary
         .format_line()
         .contains("files changed by commands: 1"));
-    assert_eq!(
-        fs::read_to_string(root.join(".devcode/.gitignore")).unwrap(),
-        "*\n"
-    );
     let out = Command::new("git")
         .current_dir(root)
         .args(["status", "--porcelain"])
         .output()
         .unwrap();
     assert!(!String::from_utf8(out.stdout).unwrap().contains(".devcode"));
-    let trace = fs::read_to_string(root.join(".devcode/trace.jsonl")).unwrap();
+    let trace = fs::read_to_string(devcode::state::dir(root).join("trace.jsonl")).unwrap();
     assert!(!trace.contains("secret"));
     assert!(!trace.contains("python3"));
     let lines: Vec<Value> = trace

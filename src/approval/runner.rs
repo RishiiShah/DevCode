@@ -41,7 +41,7 @@ impl fmt::Display for ExecutionError {
             ExecutionError::Process(err) => write!(f, "process execution error: {}", err),
             ExecutionError::Manifest(err) => write!(f, "manifest error: {}", err),
             ExecutionError::Io(err) => write!(f, "I/O error: {}", err),
-            ExecutionError::Recovery { path, reason } => write!(f, "{reason}; pre-command recovery snapshot retained at {} (file contents are in .devcode/blobs)", path.display()),
+            ExecutionError::Recovery { path, reason } => write!(f, "{reason}; pre-command recovery snapshot retained at {} (file contents are in DevCode's state blobs)", path.display()),
         }
     }
 }
@@ -135,7 +135,7 @@ pub fn execute_guarded_command_cancellable<R: BufRead, W: Write>(
     }
 
     let snap_before = snapshot_guard_set(root, None).map_err(ExecutionError::Snapshot)?;
-    let recovery_dir = root.join(".devcode/recovery").join(session_id);
+    let recovery_dir = crate::state::dir(root).join("recovery").join(session_id);
     fs::create_dir_all(&recovery_dir).map_err(ExecutionError::Io)?;
     let recovery_path = recovery_dir.join(format!("{step_id}.json"));
     let mut recovery = fs::OpenOptions::new()
@@ -324,8 +324,8 @@ pub fn apply_guarded_file_edit<R: BufRead, W: Write>(
         .map_err(ExecutionError::Io)?;
 
     if !approved {
-        let path = root
-            .join(".devcode/manifests")
+        let path = crate::state::dir(root)
+            .join("manifests")
             .join(session_id)
             .join(format!("{}.json", step_id));
         fs::remove_file(path).map_err(ExecutionError::Io)?;

@@ -178,7 +178,8 @@ fn trace_separates_model_tool_and_approval() {
         &Config::default(),
     )
     .unwrap();
-    let trace = std::fs::read_to_string(root.path().join(".devcode/trace.jsonl")).unwrap();
+    let trace =
+        std::fs::read_to_string(devcode::state::dir(root.path()).join("trace.jsonl")).unwrap();
     let rows: Vec<serde_json::Value> = trace
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())

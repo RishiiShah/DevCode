@@ -96,7 +96,9 @@ fn write_file_prompt_rejected() {
     let tools = registry(dir.path(), false);
     assert!(call(&tools, "write_file", json!({"path":"a","content":"x"})).is_err());
     assert!(!dir.path().join("a").exists());
-    assert!(!dir.path().join(".devcode/manifests/test/1.json").exists());
+    assert!(!devcode::state::dir(dir.path())
+        .join("manifests/test/1.json")
+        .exists());
 }
 #[test]
 fn edit_file_match_counts() {
@@ -125,9 +127,9 @@ fn capture_failure_refuses_write() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     fs::write(root.join("a"), "old").unwrap();
-    fs::create_dir_all(root.join(".devcode/blobs")).unwrap();
+    fs::create_dir_all(devcode::state::dir(root).join("blobs")).unwrap();
     fs::set_permissions(
-        root.join(".devcode/blobs"),
+        devcode::state::dir(root).join("blobs"),
         fs::Permissions::from_mode(0o444),
     )
     .unwrap();
@@ -135,7 +137,7 @@ fn capture_failure_refuses_write() {
     assert!(call(&tools, "write_file", json!({"path":"a","content":"new"})).is_err());
     assert_eq!(fs::read_to_string(root.join("a")).unwrap(), "old");
     fs::set_permissions(
-        root.join(".devcode/blobs"),
+        devcode::state::dir(root).join("blobs"),
         fs::Permissions::from_mode(0o755),
     )
     .unwrap();

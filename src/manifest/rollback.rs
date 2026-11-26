@@ -14,8 +14,8 @@ pub fn recover_snapshot(root: &Path, session: &str, step: usize) -> Result<PathB
             "invalid session name",
         )));
     }
-    let source = root
-        .join(".devcode/recovery")
+    let source = crate::state::dir(root)
+        .join("recovery")
         .join(session)
         .join(format!("{step}.json"));
     let data = fs::read(source).map_err(ManifestError::Io)?;
@@ -53,8 +53,8 @@ pub fn recover_snapshot(root: &Path, session: &str, step: usize) -> Result<PathB
             });
         }
     }
-    let dest = root
-        .join(".devcode/recovered")
+    let dest = crate::state::dir(root)
+        .join("recovered")
         .join(session)
         .join(step.to_string());
     fs::create_dir_all(
@@ -111,7 +111,7 @@ pub fn rollback(
     session_id: &str,
     target_step: Option<usize>,
 ) -> Result<RollbackReport, ManifestError> {
-    let session_dir = root.join(".devcode").join("manifests").join(session_id);
+    let session_dir = crate::state::dir(root).join("manifests").join(session_id);
     if !session_dir.exists() {
         return Ok(RollbackReport::default());
     }
@@ -358,12 +358,12 @@ pub fn rollback(
     })
 }
 
-/// Finds the latest active session in .devcode/manifests and rolls it back.
+/// Finds the latest active session in the project's state manifests and rolls it back.
 pub fn rollback_latest(
     root: &Path,
     target_step: Option<usize>,
 ) -> Result<RollbackReport, ManifestError> {
-    let manifests_dir = root.join(".devcode").join("manifests");
+    let manifests_dir = crate::state::dir(root).join("manifests");
     if !manifests_dir.exists() {
         return Err(ManifestError::ManifestNotFound {
             session_id: "latest".to_string(),

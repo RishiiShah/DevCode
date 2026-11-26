@@ -10,6 +10,7 @@ pub mod guard;
 pub mod manifest;
 pub mod profile;
 mod settings;
+pub mod state;
 pub mod tools;
 pub mod tui;
 

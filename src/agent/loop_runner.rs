@@ -230,23 +230,6 @@ fn run_loop(
     limits: &LoopLimits,
     context: Option<(&std::path::Path, &crate::config::Config)>,
 ) -> Result<LoopResult, ModelError> {
-    if let Some((root, _)) = context {
-        let dir = root.join(".devcode");
-        std::fs::create_dir_all(&dir).map_err(|e| ModelError::Other(e.to_string()))?;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dir.join(".gitignore"))
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(b"*\n")
-                    .map_err(|e| ModelError::Other(e.to_string()))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(ModelError::Other(e.to_string())),
-        }
-    }
     let mut verification = None;
     let mut no_progress = None;
     let mut seen = std::collections::HashMap::<(String, String), usize>::new();
@@ -723,10 +706,12 @@ fn trace_step(
     timings: (Duration, Duration, Duration),
 ) -> Result<(), ModelError> {
     use std::io::Write;
+    let dir = crate::state::dir(root);
+    std::fs::create_dir_all(&dir).map_err(|e| ModelError::Other(e.to_string()))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(root.join(".devcode/trace.jsonl"))
+        .open(dir.join("trace.jsonl"))
         .map_err(|e| ModelError::Other(e.to_string()))?;
     let entry = serde_json::json!({"step": step, "tool_name": tool_name, "argument_bytes": argument_bytes, "output_bytes": output_bytes, "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens, "model_ms": timings.0.as_millis(), "tool_ms": timings.1.as_millis(), "approval_wait_ms": timings.2.as_millis()});
     writeln!(file, "{}", entry).map_err(|e| ModelError::Other(e.to_string()))

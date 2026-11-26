@@ -175,7 +175,7 @@ fn test_skip_tests_audit_chain_integrity() {
     verify_audit_chain(root).expect("audit chain should be valid");
 
     // Tamper with audit log: modify first line
-    let audit_path = root.join(".devcode").join("audit.log");
+    let audit_path = devcode::state::dir(root).join("audit.log");
     let content = fs::read_to_string(&audit_path).unwrap();
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 2);

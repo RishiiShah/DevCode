@@ -136,7 +136,7 @@ fn resolution_and_401_redaction_and_trace() {
     )
     .unwrap();
     assert!(!format!("{:?}", result).contains(stored));
-    let trace = std::fs::read_to_string(root.join(".devcode/trace.jsonl")).unwrap();
+    let trace = std::fs::read_to_string(devcode::state::dir(&root).join("trace.jsonl")).unwrap();
     assert!(!trace.contains(stored));
     assert!(!trace.contains(environment));
 }

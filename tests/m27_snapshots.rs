@@ -54,7 +54,7 @@ fn missing_snapshot_blob_does_not_fail_the_run() {
         "test".into(),
         ApprovalPrompt::new(Cursor::new(b"y\n".to_vec()), io::sink(), true, true),
     ));
-    let blobs = dir.path().join(".devcode/blobs");
+    let blobs = devcode::state::dir(dir.path()).join("blobs");
     let limits = LoopLimits {
         // Simulate a command that wiped the snapshot store right after the edit.
         progress: Some(ProgressSink(Arc::new(move |e| {

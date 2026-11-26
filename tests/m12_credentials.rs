@@ -293,6 +293,7 @@ fn scripted_run_redacts_tool_output_and_arguments() {
     )
     .unwrap();
     assert!(!format!("{:?}", result).contains("synthetic-secret-789"));
-    let trace = std::fs::read_to_string(root.path().join(".devcode/trace.jsonl")).unwrap();
+    let trace =
+        std::fs::read_to_string(devcode::state::dir(root.path()).join("trace.jsonl")).unwrap();
     assert!(!trace.contains("synthetic-secret-789"));
 }
