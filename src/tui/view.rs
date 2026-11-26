@@ -162,7 +162,6 @@ fn welcome_card(app: &App) -> Vec<Line<'static>> {
 enum ToolGroup {
     Explore,
     Run,
-    Edit,
 }
 
 fn tool_group(name: &str) -> Option<ToolGroup> {
@@ -171,7 +170,6 @@ fn tool_group(name: &str) -> Option<ToolGroup> {
             Some(ToolGroup::Explore)
         }
         "run_command" => Some(ToolGroup::Run),
-        "edit_file" | "write_file" => Some(ToolGroup::Edit),
         _ => None,
     }
 }
@@ -183,9 +181,6 @@ struct ToolRun<'a> {
     calls: Vec<usize>,
     end: usize,
     entries: Vec<(&'a str, &'a str, Option<bool>)>,
-    /// Lines added and removed across the run's edit diffs.
-    added: usize,
-    removed: usize,
 }
 
 fn tool_run(items: &[Item], start: usize) -> ToolRun<'_> {
@@ -198,8 +193,6 @@ fn tool_run(items: &[Item], start: usize) -> ToolRun<'_> {
         calls: Vec::new(),
         end: start,
         entries: Vec::new(),
-        added: 0,
-        removed: 0,
     };
     let mut j = start;
     while let Some(Item::Tool { name, summary }) = items.get(j) {
@@ -207,14 +200,7 @@ fn tool_run(items: &[Item], start: usize) -> ToolRun<'_> {
             break;
         }
         let result = match items.get(j + 1) {
-            Some(Item::ToolResult { ok, diff, .. }) => {
-                if let Some(diff) = diff {
-                    let (_, added, removed) = numbered_diff(diff);
-                    run.added += added;
-                    run.removed += removed;
-                }
-                Some(*ok)
-            }
+            Some(Item::ToolResult { ok, .. }) => Some(*ok),
             _ => None,
         };
         run.calls.push(j);
@@ -275,22 +261,6 @@ fn group_line(run: &ToolRun, dim: Style) -> Line<'static> {
             let verb = if running { "Exploring" } else { "Explored" };
             (verb, parts.join(", "), names.join(", "))
         }
-        ToolGroup::Edit => {
-            let mut files: Vec<&str> = Vec::new();
-            for (_, s, _) in &run.entries {
-                let name = s.rsplit('/').next().unwrap_or(s);
-                if !files.contains(&name) {
-                    files.push(name);
-                }
-            }
-            let n = files.len();
-            let verb = if running { "Editing" } else { "Edited" };
-            (
-                verb,
-                format!("{n} file{}", if n == 1 { "" } else { "s" }),
-                files.join(", "),
-            )
-        }
         ToolGroup::Run => {
             let n = run.entries.len();
             let verb = if running { "Running" } else { "Ran" };
@@ -319,16 +289,6 @@ fn group_line(run: &ToolRun, dim: Style) -> Line<'static> {
         Span::raw(counts),
         Span::styled(format!(" ({detail})"), dim),
     ];
-    if run.added + run.removed > 0 {
-        spans.push(Span::styled(
-            format!("  +{}", run.added),
-            Style::new().fg(Color::Green),
-        ));
-        spans.push(Span::styled(
-            format!(" −{}", run.removed),
-            Style::new().fg(Color::Red),
-        ));
-    }
     if failed > 0 {
         spans.push(Span::styled(
             format!("  {failed} failed"),
@@ -523,11 +483,25 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
                 if i == 0 || !matches!(items[i - 1], Item::ToolResult { .. } | Item::Tool { .. }) {
                     lines.push(Line::raw(""));
                 }
-                lines.push(Line::from(vec![
+                let mut header = vec![
                     Span::styled("● ", dot),
                     Span::styled(name.clone(), Style::new().bold()),
                     Span::styled(format!("  {summary}"), dim),
-                ]));
+                ];
+                if let Some((true, _, Some(diff))) = result {
+                    let (_, added, removed) = numbered_diff(diff);
+                    if added + removed > 0 {
+                        header.push(Span::styled(
+                            format!("  +{added}"),
+                            Style::new().fg(Color::Green),
+                        ));
+                        header.push(Span::styled(
+                            format!(" −{removed}"),
+                            Style::new().fg(Color::Red),
+                        ));
+                    }
+                }
+                lines.push(Line::from(header));
                 match result {
                     Some((true, preview, Some(diff))) => {
                         push_diff_lines(&mut lines, preview, diff, expanded, dim);
@@ -1058,6 +1032,27 @@ fn approval_view(modal: &Modal) -> Option<ApprovalView> {
             })
         }
         Modal::Confirm { text, .. } => {
+            if let Some(rest) = text
+                .lines()
+                .rev()
+                .find_map(|l| l.split_once("Edit to '"))
+                .and_then(|(_, after)| after.split_once("' is outside declared scope"))
+                .map(|(path, _)| path.to_string())
+            {
+                let (body, added, removed) = numbered_diff(text);
+                return Some(ApprovalView {
+                    title: vec![
+                        Span::styled(
+                            format!("Edit outside scope: {rest}"),
+                            Style::new().bold().fg(Color::Yellow),
+                        ),
+                        Span::styled(format!("  +{added}"), Style::new().fg(Color::Green)),
+                        Span::styled(format!(" −{removed}"), Style::new().fg(Color::Red)),
+                    ],
+                    body,
+                    choices: CONFIRM_CHOICES,
+                });
+            }
             let question = text.trim_end().trim_end_matches("[y]es / [n]o:").trim_end();
             let command = question
                 .split_once("detected: '")
@@ -1108,6 +1103,8 @@ fn numbered_diff(text: &str) -> (Vec<Line<'static>>, usize, usize) {
             || l.starts_with("+++")
             || l.starts_with('\\')
             || l.starts_with("Approve edit to '")
+            || l.starts_with("Edit to '")
+            || l.starts_with("Dependency addition detected in '")
         {
             continue;
         }
@@ -1415,15 +1412,38 @@ fn draw_docked_prompt(frame: &mut Frame, screen: Rect, modal: &Modal) {
     let (title, body, hint): (Vec<Span<'static>>, Vec<Line<'static>>, &'static str) = match modal {
         Modal::Text { text, input } => {
             let (title, mut body) = if let Some(path) = dependency_manifest_path(text) {
-                (
-                    vec![
-                        Span::styled("Dependency addition", Style::new().bold().fg(Color::Yellow)),
-                        Span::styled(format!(" · {path}"), dim),
-                    ],
-                    vec![Line::raw(
-                        "Enter a one-line justification to approve adding this dependency:",
-                    )],
-                )
+                let (diff_body, added, removed) = numbered_diff(text);
+                let mut lines = Vec::new();
+                if !diff_body.is_empty() {
+                    const MAX_DIFF_PREVIEW: usize = 10;
+                    let total = diff_body.len();
+                    lines.extend(diff_body.into_iter().take(MAX_DIFF_PREVIEW));
+                    if total > MAX_DIFF_PREVIEW {
+                        lines.push(Line::styled(
+                            format!("     … +{} more diff lines", total - MAX_DIFF_PREVIEW),
+                            dim,
+                        ));
+                    }
+                    lines.push(Line::raw(""));
+                }
+                lines.push(Line::raw(
+                    "Enter a one-line justification to approve adding this dependency:",
+                ));
+                let mut title = vec![
+                    Span::styled("Dependency addition", Style::new().bold().fg(Color::Yellow)),
+                    Span::styled(format!(" · {path}"), dim),
+                ];
+                if added + removed > 0 {
+                    title.push(Span::styled(
+                        format!("  +{added}"),
+                        Style::new().fg(Color::Green),
+                    ));
+                    title.push(Span::styled(
+                        format!(" −{removed}"),
+                        Style::new().fg(Color::Red),
+                    ));
+                }
+                (title, lines)
             } else {
                 (
                     vec![Span::styled("Input needed", Style::new().bold())],
@@ -1447,7 +1467,7 @@ fn draw_docked_prompt(frame: &mut Frame, screen: Rect, modal: &Modal) {
                     Span::styled("▏", Style::new().fg(Color::Cyan)),
                 ]));
             }
-            (title, body, "Enter submit · Esc reject")
+            (title, body, "Type justification then Enter · Esc reject")
         }
         Modal::Secret { name, input } => {
             let label = name.as_deref().unwrap_or("the configured provider");
@@ -1776,16 +1796,20 @@ mod tests {
         let mut app = App::new(Profile::Build, "nim · m".into(), None);
         app.status = Status::Working { step: 2 };
         app.on_event(Ev::PromptText(
-            "Dependency addition detected in 'package.json'. Enter justification to approve: "
+            "--- a/package.json\n+++ b/package.json\n@@ -1,3 +1,4 @@\n {\n   \"dependencies\": {\n+    \"lucide-react\": \"^0.400.0\"\n   }\nDependency addition detected in 'package.json'. Enter justification to approve: "
                 .into(),
         ));
         app.on_event(Ev::NeedInput);
         let screen = render(&mut app, 100, 24);
         assert!(
-            screen.contains("Dependency addition · package.json"),
+            screen.contains("Dependency addition · package.json  +1 −0"),
             "{screen}"
         );
-        assert!(screen.contains("Enter submit · Esc reject"), "{screen}");
+        assert!(screen.contains("\"lucide-react\""), "{screen}");
+        assert!(
+            screen.contains("Type justification then Enter · Esc reject"),
+            "{screen}"
+        );
         assert!(screen.contains("Type justification…"), "{screen}");
         assert!(
             !screen.contains("Type to steer the run"),
@@ -2033,21 +2057,41 @@ mod tests {
             preview: "Updated calc.py".into(),
             diff: Some("--- a/calc.py\n+++ b/calc.py\n@@ -3,3 +3,3 @@\n def add(a, b):\n-    return a - b\n+    return a + b\n \n".into()),
         });
-        let collapsed = render(&mut app, 80, 24);
+        // Diffs are visible inline without requiring Ctrl-T.
+        let inline = render(&mut app, 80, 24);
+        assert!(inline.contains("● edit_file  calc.py  +1 −1"), "{inline}");
         assert!(
-            collapsed.contains("● Edited 1 file (calc.py)  +1 −1"),
-            "{collapsed}"
+            inline.contains("⎿  Updated calc.py with 1 addition and 1 removal"),
+            "{inline}"
         );
-        assert!(!collapsed.contains("return a - b"), "diff waits for Ctrl-T");
-        app.expanded_tool = Some(1);
-        let screen = render(&mut app, 80, 24);
-        assert!(
-            screen.contains("⎿  Updated calc.py with 1 addition and 1 removal"),
-            "{screen}"
-        );
-        assert!(screen.contains("4 -     return a - b"), "{screen}");
-        assert!(screen.contains("4 +     return a + b"), "{screen}");
-        assert!(!screen.contains("+++"), "{screen}");
+        assert!(inline.contains("4 -     return a - b"), "{inline}");
+        assert!(inline.contains("4 +     return a + b"), "{inline}");
+        assert!(!inline.contains("+++"), "{inline}");
+
+        // Longer diffs preview 16 lines inline and expand fully with Ctrl-T.
+        let mut long_diff = String::from("--- a/big.rs\n+++ b/big.rs\n@@ -1,0 +1,20 @@\n");
+        for i in 0..20 {
+            long_diff.push_str(&format!("+line-{i:02}\n"));
+        }
+        app.items.clear();
+        app.items.push(Item::Tool {
+            name: "write_file".into(),
+            summary: "big.rs".into(),
+        });
+        app.items.push(Item::ToolResult {
+            ok: true,
+            preview: "Updated big.rs".into(),
+            diff: Some(long_diff),
+        });
+        let preview = render(&mut app, 80, 30);
+        assert!(preview.contains("line-00"), "{preview}");
+        assert!(preview.contains("Ctrl-T to expand"), "{preview}");
+        assert!(!preview.contains("line-19"), "{preview}");
+
+        app.expanded_tool = Some(0);
+        let expanded = render(&mut app, 80, 35);
+        assert!(expanded.contains("line-19"), "{expanded}");
+        assert!(!expanded.contains("Ctrl-T to expand"), "{expanded}");
     }
 
     #[test]

@@ -331,9 +331,13 @@ impl App {
             Ev::NeedInput => {
                 let text = std::mem::take(&mut self.pending_prompt);
                 let modal = classify_prompt(text);
-                // Enter must not run a risky command by default; edits and dev servers start on Yes.
+                // Enter must not run a risky shell command by default; edits, dev servers,
+                // and out-of-scope file edits start on Yes.
                 self.approval_choice = match &modal {
-                    Modal::Confirm { text, .. } if !text.contains("long-running") => {
+                    Modal::Confirm { text, .. }
+                        if text.contains("Destructive command detected:")
+                            && !text.contains("long-running") =>
+                    {
                         CONFIRM_CHOICES.len() - 1
                     }
                     _ => 0,
@@ -1162,7 +1166,10 @@ impl App {
                 KeyCode::Enter => {
                     let line = input.trim().to_string();
                     if line.is_empty() {
-                        self.answer("n", "rejected")
+                        // Do not silently reject on accidental empty Enter; keep the prompt open
+                        // so only Esc/Ctrl-C cancels or a non-empty justification submits.
+                        self.modal = Some(Modal::Text { text, input });
+                        Vec::new()
                     } else {
                         self.answer(&line, "justification recorded")
                     }
@@ -2185,17 +2192,28 @@ mod tests {
         ));
         a.on_event(Ev::NeedInput);
         assert!(matches!(a.modal, Some(Modal::Confirm { .. })));
+        assert_eq!(a.approval_choice, 1, "risky command defaults to No");
         let actions = a.on_key(key(KeyCode::Esc));
         assert!(matches!(&actions[..], [Action::Answer(s)] if s == "n"));
+
+        // Out-of-scope file edits default to Yes so Enter confirms instead of rejecting.
+        a.on_event(Ev::PromptText(
+            "--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-a\n+b\nEdit to 'package.json' is outside declared scope. Approve? [y]es / [n]o: ".into(),
+        ));
+        a.on_event(Ev::NeedInput);
+        assert_eq!(a.approval_choice, 0, "scope confirm defaults to Yes");
     }
 
     #[test]
-    fn dependency_prompt_takes_text() {
+    fn dependency_prompt_takes_text_and_ignores_empty_enter() {
         let mut a = app();
         a.on_event(Ev::PromptText(
             "Dependency addition detected in 'Cargo.toml'. Enter justification to approve: ".into(),
         ));
         a.on_event(Ev::NeedInput);
+        assert!(matches!(a.modal, Some(Modal::Text { .. })));
+        // Empty Enter keeps the prompt open instead of silently rejecting.
+        assert!(a.on_key(key(KeyCode::Enter)).is_empty());
         assert!(matches!(a.modal, Some(Modal::Text { .. })));
         type_str(&mut a, "needed for tui");
         let actions = a.on_key(key(KeyCode::Enter));

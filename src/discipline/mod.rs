@@ -64,6 +64,9 @@ pub fn apply_disciplined_file_edit<R: BufRead, W: Write>(
             return Ok(false);
         }
 
+        let scope_diff =
+            crate::approval::format_diff(&old_content, new_content, &rel_path.to_string_lossy());
+        write!(prompt.writer, "{scope_diff}").map_err(ExecutionError::Io)?;
         write!(
             prompt.writer,
             "Edit to '{}' is outside declared scope. Approve? [y]es / [n]o: ",
@@ -96,6 +99,9 @@ pub fn apply_disciplined_file_edit<R: BufRead, W: Write>(
     // Check for dependency addition
     let mut justification = None;
     if has_dependency_addition(rel_path, &old_content, new_content) {
+        let dep_diff =
+            crate::approval::format_diff(&old_content, new_content, &rel_path.to_string_lossy());
+        write!(prompt.writer, "{dep_diff}").map_err(ExecutionError::Io)?;
         let just_opt = prompt_dependency_addition(
             &rel_path.to_string_lossy(),
             &mut prompt.reader,
