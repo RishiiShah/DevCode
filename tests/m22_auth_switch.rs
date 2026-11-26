@@ -248,7 +248,7 @@ fn bearer(raw: &[u8]) -> String {
 }
 
 #[test]
-fn openai_compat_bearer_uses_the_active_slot_until_env_is_set() {
+fn openai_compat_bearer_uses_the_active_slot_even_when_env_is_set() {
     let _guard = env_lock();
     std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
     std::env::remove_var(ENV_NAME);
@@ -315,8 +315,9 @@ fn openai_compat_bearer_uses_the_active_slot_until_env_is_set() {
     assert!(work_headers.contains(&format!("authorization: bearer {WORK}")));
     assert!(!work_headers.contains(PLAIN));
     assert!(!work_headers.contains(ENV_KEY));
-    assert!(env_headers.contains(&format!("authorization: bearer {ENV_KEY}")));
-    assert!(!env_headers.contains(WORK));
+    // P10e: an explicit switch beats the environment.
+    assert!(env_headers.contains(&format!("authorization: bearer {WORK}")));
+    assert!(!env_headers.contains(ENV_KEY));
     assert!(!env_headers.contains(PLAIN));
 }
 
@@ -419,4 +420,37 @@ fn plain_connect_clears_a_shadowing_slot_and_bare_connect_follows_the_slot() {
         Some("plain-key")
     );
     assert!(session.has_stored_key("nim"));
+}
+
+#[test]
+fn env_still_beats_stored_when_nothing_was_switched() {
+    let _guard = env_lock();
+    std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
+    let storage = tempfile::tempdir().unwrap();
+    let dir = storage.path().join("config");
+    std::env::set_var("DEVCODE_CONFIG_DIR", &dir);
+    let mut entries = BTreeMap::new();
+    entries.insert("nim".into(), PLAIN.into());
+    entries.insert("nim:work".into(), WORK.into());
+    credentials::save(&dir, &entries).unwrap();
+    std::env::set_var(ENV_NAME, ENV_KEY);
+    let (url, requests) = scripted_server(vec![(
+        200,
+        r#"{"choices":[{"message":{"content":"ok"}}]}"#.into(),
+    )]);
+    let request = Request {
+        system_prompt: String::new(),
+        messages: vec![],
+        tools: vec![],
+    };
+    OpenAiCompat::new(provider(&url))
+        .unwrap()
+        .complete(&request)
+        .unwrap();
+    std::env::remove_var(ENV_NAME);
+    let recorded = requests.lock().unwrap();
+    let headers = bearer(&recorded[0]);
+    assert!(headers.contains(&format!("authorization: bearer {ENV_KEY}")));
+    assert!(!headers.contains(WORK));
+    assert!(!headers.contains(PLAIN));
 }

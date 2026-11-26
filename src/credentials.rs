@@ -322,6 +322,20 @@ pub fn selected_slot_name(dir: &Path, connector: &str) -> io::Result<String> {
     Ok(selected_key(active.as_deref(), connector).to_owned())
 }
 
+/// Key chosen by an explicit `auth switch` / `/connect` for this connector, if any.
+/// Unreadable settings or credentials count as "no switch" so env keys keep working.
+/// P10e: an explicit switch beats the environment; without one, env stays first.
+pub fn switched_key(connector: &str) -> Option<String> {
+    let dir = config_dir().ok()?;
+    let root = std::env::current_dir().ok()?;
+    ensure_outside_workspace(&root, &dir).ok()?;
+    let active = read_active_slot(&dir).ok()??;
+    if !slot_selects(&active, connector) {
+        return None;
+    }
+    stored_key(&dir, connector).ok().flatten()
+}
+
 /// Stored API key for `connector`.
 /// When `active_slot` is `connector` or `connector:alias`, that exact entry is used
 /// and a missing entry does not fall back to the plain key. Otherwise the plain key.

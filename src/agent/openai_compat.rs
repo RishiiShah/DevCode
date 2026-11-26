@@ -29,6 +29,11 @@ impl OpenAiCompat {
                 .ok()
                 .filter(|key| !key.is_empty())
         };
+        let switched = config
+            .connector
+            .as_deref()
+            .and_then(crate::credentials::switched_key);
+        let key = switched.or(key);
         let key = match key {
             Some(key) => key,
             None if config.connector.is_none() && config.api_key_env.is_empty() => String::new(),

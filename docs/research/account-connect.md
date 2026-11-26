@@ -55,7 +55,7 @@ Where does DevCode lag peers on connecting provider accounts (Codex / Claude / G
 | OAuth / device code | Codex / gemini-cli |
 | OS keyring (optional file) | Codex / gemini-cli |
 | Multi-key per connector + `auth switch` | OpenCode `auth switch` |
-| Stored-vs-env policy revisit | Pi stored-first vs DevCode env-first (M12) |
+| Stored-vs-env policy | Decided (P10e): explicit switch beats env; otherwise env-first. pi/OpenCode are stored-first; intentional difference. |
 
 ## Stop condition (peer-done)
 
