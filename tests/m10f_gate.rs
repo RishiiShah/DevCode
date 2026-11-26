@@ -97,6 +97,9 @@ fn build_request_contains_instructions() {
     )
     .unwrap();
     let req = seen.lock().unwrap().clone().unwrap();
+    assert!(req
+        .system_prompt
+        .contains("Complete the entire requested change"));
     assert!(req.system_prompt.contains("run it before editing"));
     assert!(req
         .system_prompt
