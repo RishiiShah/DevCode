@@ -79,31 +79,71 @@ fn short_path(path: &std::path::Path) -> String {
     }
 }
 
-/// Startup card, as Claude Code and Codex open: name and version, model, folder.
+/// Startup card, as Claude Code and Codex open: name and version, then provider, model,
+/// profile and folder in an aligned column, each with its key hint.
 fn welcome_card(app: &App) -> Vec<Line<'static>> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let border = Style::new().fg(Color::DarkGray);
-    let cwd = short_path(&std::env::current_dir().unwrap_or_default());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let folder = match home {
+        Some(h) if cwd.starts_with(&h) => {
+            format!("~/{}", cwd.strip_prefix(&h).unwrap_or(&cwd).display())
+        }
+        _ => cwd.display().to_string(),
+    };
+    let (provider, model, effort) = label_parts(&app.provider);
+    let model = match effort {
+        Some(e) => format!("{model}  ({e} effort)"),
+        None => model.to_string(),
+    };
+    let profile = app.profile.name().to_string();
+    let value_width = [
+        provider.width(),
+        model.width(),
+        profile.width(),
+        folder.width(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    // Hints line up in their own column after the widest value.
+    let row = |label: &str, value: String, value_style: Style, hint: &str| {
+        let pad = value_width.saturating_sub(value.width()) + 3;
+        let hint = if hint.is_empty() {
+            String::new()
+        } else {
+            format!("{}{hint}", " ".repeat(pad))
+        };
+        vec![
+            Span::styled(format!("{label:<10}"), dim),
+            Span::styled(value, value_style),
+            Span::styled(hint, dim),
+        ]
+    };
     let rows: Vec<Vec<Span<'static>>> = vec![
         vec![
             Span::styled(">_ ", Style::new().fg(Color::Cyan).bold()),
             Span::styled("DevCode", Style::new().bold()),
-            Span::styled(format!(" (v{})", env!("CARGO_PKG_VERSION")), dim),
+            Span::styled(format!("  v{}", env!("CARGO_PKG_VERSION")), dim),
         ],
         Vec::new(),
-        vec![
-            Span::styled("model:     ", dim),
-            Span::raw(app.provider.clone()),
-            Span::styled("   /model to change", dim),
-        ],
-        vec![Span::styled("directory: ", dim), Span::raw(cwd)],
+        row("provider", provider.to_string(), Style::new(), "/provider"),
+        row("model", model, Style::new().bold(), "/model"),
+        row(
+            "profile",
+            profile.clone(),
+            Style::new().fg(profile_color(app.profile)),
+            "Shift+Tab",
+        ),
+        row("folder", folder, Style::new(), ""),
     ];
     let inner = rows
         .iter()
         .map(|r| r.iter().map(|s| s.content.width()).sum::<usize>())
         .max()
         .unwrap_or(0)
-        + 2;
+        + 3;
     let mut out = vec![Line::styled(format!("╭{}╮", "─".repeat(inner)), border)];
     for row in rows {
         let used: usize = row.iter().map(|s| s.content.width()).sum();
@@ -826,9 +866,9 @@ fn flash(app: &App) -> Option<&str> {
 }
 
 /// Left and right text in one row, the left side cut with `…` when both do not fit.
-fn split_row(left: Vec<Span<'static>>, right: String, width: u16) -> Line<'static> {
-    let dim = Style::new().add_modifier(Modifier::DIM);
-    let room = (width as usize).saturating_sub(right.width() + 1);
+fn split_row(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: u16) -> Line<'static> {
+    let right_width: usize = right.iter().map(|s| s.content.width()).sum();
+    let room = (width as usize).saturating_sub(right_width + 1);
     let mut used = 0usize;
     let mut spans = Vec::new();
     for span in left {
@@ -853,9 +893,9 @@ fn split_row(left: Vec<Span<'static>>, right: String, width: u16) -> Line<'stati
         break;
     }
     spans.push(Span::raw(
-        " ".repeat((width as usize).saturating_sub(used + right.width())),
+        " ".repeat((width as usize).saturating_sub(used + right_width)),
     ));
-    spans.push(Span::styled(right, dim));
+    spans.extend(right);
     Line::from(spans)
 }
 
@@ -876,7 +916,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         None => "Ctrl-C to cancel ".into(),
     };
     let left = vec![Span::styled(left, Style::new().fg(Color::Cyan))];
-    let mut line = split_row(left, right, area.width);
+    let mut line = split_row(left, vec![Span::styled(right, dim)], area.width);
     if !app.is_working() {
         line = line.style(dim);
     }
@@ -885,51 +925,102 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Session row under the input: profile, provider and model on the left; background processes,
 /// session tokens and the folder on the right.
+/// `connector · model · effort LEVEL` split into its parts.
+fn label_parts(label: &str) -> (&str, &str, Option<&str>) {
+    let mut parts = label.split(" · ");
+    let provider = parts.next().unwrap_or(label);
+    let model = parts.next().unwrap_or("");
+    let effort = parts.find_map(|p| p.strip_prefix("effort "));
+    (provider, model, effort)
+}
+
+/// Remaining context as a small meter, green → yellow → red as it fills.
+fn context_meter(left: u64) -> Vec<Span<'static>> {
+    const CELLS: u64 = 8;
+    let filled = ((left * CELLS) + 50) / 100;
+    let color = match left {
+        50.. => Color::Green,
+        20..50 => Color::Yellow,
+        _ => Color::Red,
+    };
+    vec![
+        Span::styled("▰".repeat(filled as usize), Style::new().fg(color)),
+        Span::styled(
+            "▱".repeat((CELLS - filled) as usize),
+            Style::new().fg(Color::DarkGray),
+        ),
+        Span::styled(format!(" {left}% context"), Style::new().fg(color)),
+    ]
+}
+
+/// Session row under the input. Left: profile, provider, model, effort. Right: the
+/// `/statusline` items; when space runs out the last ones go first, then the model is cut.
 fn draw_info(frame: &mut Frame, area: Rect, app: &App) {
-    let mut right = Vec::new();
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let mut right: Vec<Vec<Span<'static>>> = Vec::new();
     for item in &app.statusline {
-        let text = match item.as_str() {
-            "processes" if app.bg_processes > 0 => format!("{} background (/ps)", app.bg_processes),
+        let spans = match item.as_str() {
+            "processes" if app.bg_processes > 0 => vec![
+                Span::styled("◉ ", Style::new().fg(Color::Green)),
+                Span::styled(format!("{} background", app.bg_processes), dim),
+            ],
             "context" => match app.context_left() {
-                Some(left) => format!("{left}% context left"),
+                Some(left) => context_meter(left),
                 None => continue,
             },
-            "tokens" if app.total_in + app.total_out > 0 => format!(
-                "{} in / {} out",
-                super::app::tokens(app.total_in),
-                super::app::tokens(app.total_out)
-            ),
+            "tokens" if app.total_in + app.total_out > 0 => vec![Span::styled(
+                format!(
+                    "↑{} ↓{}",
+                    super::app::tokens(app.total_in),
+                    super::app::tokens(app.total_out)
+                ),
+                dim,
+            )],
             "branch" => match &app.branch {
-                Some(branch) => format!("⎇ {branch}"),
+                Some(branch) => vec![Span::styled(format!("⎇ {branch}"), dim)],
                 None => continue,
             },
-            "folder" => short_path(&std::env::current_dir().unwrap_or_default()),
+            "folder" => vec![Span::styled(
+                short_path(&std::env::current_dir().unwrap_or_default()),
+                dim,
+            )],
             _ => continue,
         };
-        right.push(text);
+        right.push(spans);
     }
-    let left = vec![
+    let (provider, model, effort) = label_parts(&app.provider);
+    let mut left = vec![
+        Span::styled(" ● ", Style::new().fg(profile_color(app.profile))),
         Span::styled(
-            format!(" {} ", app.profile.name()),
-            Style::new()
-                .bold()
-                .fg(Color::Black)
-                .bg(profile_color(app.profile)),
+            app.profile.name().to_string(),
+            Style::new().bold().fg(profile_color(app.profile)),
         ),
-        Span::raw(" "),
-        Span::styled(app.provider.clone(), Style::new().fg(Color::Gray)),
+        Span::styled("   ", dim),
+        Span::styled(format!("{provider} "), dim),
+        Span::raw(model.to_string()),
     ];
-    // The model matters most: drop the last items (folder, branch, tokens) before cutting it.
-    let left_width: usize = left.iter().map(|s| s.content.width()).sum();
-    while right.len() > 1 && left_width + right.join(" · ").width() + 3 > area.width as usize {
+    if let Some(effort) = effort {
+        left.push(Span::styled(format!(" · {effort}"), dim));
+    }
+    let width_of = |spans: &[Span]| spans.iter().map(|s| s.content.width()).sum::<usize>();
+    let left_width = width_of(&left);
+    let gap = 3;
+    let joined = |right: &[Vec<Span<'static>>]| -> Vec<Span<'static>> {
+        let mut out = Vec::new();
+        for (i, item) in right.iter().enumerate() {
+            if i > 0 {
+                out.push(Span::styled("   ", dim));
+            }
+            out.extend(item.iter().cloned());
+        }
+        out.push(Span::raw(" "));
+        out
+    };
+    while right.len() > 1 && left_width + width_of(&joined(&right)) + gap > area.width as usize {
         right.pop();
     }
     frame.render_widget(
-        Paragraph::new(split_row(
-            left,
-            format!("{} ", right.join(" · ")),
-            area.width,
-        )),
+        Paragraph::new(split_row(left, joined(&right), area.width)),
         area,
     );
 }
@@ -1442,10 +1533,7 @@ mod tests {
         assert!(!left.contains("step"));
         assert!(!left.contains("blocked"));
         let screen = render(&mut app, 80, 20);
-        assert!(
-            footer_row(&screen).contains("12.3k in / 678 out"),
-            "{screen}"
-        );
+        assert!(footer_row(&screen).contains("↑12.3k ↓678"), "{screen}");
     }
 
     #[test]
@@ -1506,8 +1594,10 @@ mod tests {
         let mut app = App::new(Profile::Build, "nim · model-x".into(), None);
         let screen = render(&mut app, 80, 20);
         let info = footer_row(&screen);
-        assert!(info.contains(" build "), "{screen}");
-        assert!(info.contains("nim · model-x"), "{screen}");
+        assert!(info.contains("● build"), "{screen}");
+        assert!(info.contains("nim model-x"), "{screen}");
+        assert!(screen.contains("model     model-x"), "{screen}");
+        assert!(screen.contains("provider  nim"), "{screen}");
         assert!(
             screen.contains("› Ask anything · / for commands"),
             "{screen}"
@@ -1841,7 +1931,7 @@ mod tests {
         app.total_out = 2_140;
         let screen = render(&mut app, 60, 12);
         let info = footer_row(&screen);
-        assert!(info.contains("129.4k in / 2.1k out"), "{info}");
+        assert!(info.contains("↑129.4k ↓2.1k"), "{info}");
         assert!(info.contains('…'), "{info}");
         assert_eq!(info.width(), 60, "{info}");
     }
@@ -1922,7 +2012,7 @@ mod tests {
         app.context_used = 25_000;
         app.branch = Some("feat/tui".into());
         let info = footer_row(&render(&mut app, 120, 12)).to_string();
-        assert!(info.contains("75% context left"), "{info}");
+        assert!(info.contains("▰▰▰▰▰▰▱▱ 75% context"), "{info}");
         assert!(info.contains("⎇ feat/tui"), "{info}");
         app.statusline.retain(|s| s != "branch");
         let info = footer_row(&render(&mut app, 120, 12)).to_string();
