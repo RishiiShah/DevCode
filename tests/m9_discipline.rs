@@ -552,7 +552,10 @@ fn oversized_file_read_is_truncated_and_the_run_continues() {
             arguments: "{}".into(),
             thought_signature: None,
         }],
-        usage: Usage::default(),
+        usage: Usage {
+            input_tokens: Some(700),
+            ..Usage::default()
+        },
     };
     let model = ScriptedModel::new(vec![
         Ok(read("r1")),
@@ -577,7 +580,7 @@ fn oversized_file_read_is_truncated_and_the_run_continues() {
         .find(|m| m.role == Role::Tool)
         .unwrap();
     assert!(
-        observation.content.len() < 21_000,
+        observation.content.len() < 13_000,
         "{}",
         observation.content.len()
     );

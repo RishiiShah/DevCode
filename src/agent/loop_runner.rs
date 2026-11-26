@@ -41,7 +41,7 @@ impl ExitReason {
 }
 
 /// Per-turn ceiling for file and search results, below the 6,000-token NFR-4 budget (bytes / 4).
-const TURN_READ_LIMIT_BYTES: usize = 20_000;
+const TURN_READ_LIMIT_BYTES: usize = 12_000;
 
 /// Live progress notifications for a UI. Never carries file contents beyond a short preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,7 +355,7 @@ fn run_loop(
         if calibration.conservative(estimated.system_prompt) > 2_500 {
             break ExitReason::SystemPromptBudgetExceeded;
         }
-        if calibration.conservative(InputEstimate::latest_file_reads(&req)) > 6_000 {
+        if InputEstimate::latest_file_reads(&req) > 6_000 {
             break ExitReason::ToolContextBudgetExceeded;
         }
         tool_protocol::prepare(&mut req, tool_mode);
