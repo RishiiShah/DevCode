@@ -57,8 +57,8 @@ pub enum Ev {
     Processes(usize),
     /// Saved conversations as (picker label, id), newest first.
     Conversations(Vec<(String, String)>),
-    /// A saved conversation was loaded; its messages rebuild the transcript.
-    Resumed(Vec<crate::agent::Message>),
+    /// A saved conversation was loaded; its messages and tool outcomes rebuild the transcript.
+    Resumed(Box<crate::conversation::LoadedConversation>),
 }
 
 pub struct ChannelWriter(pub Sender<Ev>);
@@ -220,8 +220,8 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
             let _ = events.send(Ev::Conversations(list));
         }
         Cmd::Resume(id) => {
-            let _ = events.send(match session.resume(&id) {
-                Ok(messages) => Ev::Resumed(messages),
+            let _ = events.send(match session.resume_full(&id) {
+                Ok(loaded) => Ev::Resumed(Box::new(loaded)),
                 Err(e) => Ev::Failed(e.to_string()),
             });
         }

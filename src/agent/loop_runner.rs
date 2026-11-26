@@ -71,7 +71,7 @@ impl std::fmt::Debug for ProgressSink {
 }
 
 /// Up to three non-empty lines of a tool result, each cut to 110 chars, indentation kept.
-fn preview_lines(text: &str) -> String {
+pub fn preview_lines(text: &str) -> String {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let mut out: Vec<String> = lines
         .iter()
@@ -178,13 +178,23 @@ impl Default for LoopLimits {
     }
 }
 
+/// Persisted outcome metadata for one tool call, so resumed transcripts match live runs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolOutcome {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopResult {
     pub exit_reason: ExitReason,
     pub steps: usize,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    pub last_input_tokens: u64,
     pub messages: Vec<Message>,
+    pub tool_outcomes: std::collections::BTreeMap<String, ToolOutcome>,
     pub summary: Option<TaskSummary>,
     pub verification: Option<String>,
     pub no_progress: Option<(String, usize)>,
@@ -245,6 +255,8 @@ fn run_loop(
     let mut steps = 0;
     let mut total_input_tokens = 0;
     let mut total_output_tokens = 0;
+    let mut last_input_tokens = 0;
+    let mut tool_outcomes = std::collections::BTreeMap::new();
     let mut consecutive_format_errors = 0;
     let start_time = Instant::now();
 
@@ -365,6 +377,7 @@ fn run_loop(
         let model_time = step_start.elapsed();
         total_input_tokens += response.usage.input_tokens;
         total_output_tokens += response.usage.output_tokens;
+        last_input_tokens = response.usage.input_tokens;
         steps += 1;
         limits.emit(ProgressEvent::Usage {
             input: total_input_tokens,
@@ -530,11 +543,19 @@ fn run_loop(
             };
 
             let observation = model.redact_sensitive(&observation);
+            let diff = tools.take_diff().map(|d| model.redact_sensitive(&d));
+            tool_outcomes.insert(
+                call.id.clone(),
+                ToolOutcome {
+                    ok: tool_ok,
+                    diff: diff.clone(),
+                },
+            );
             limits.emit(ProgressEvent::ToolResult {
                 name: call.name.clone(),
                 ok: tool_ok,
                 preview: preview_lines(&observation),
-                diff: tools.take_diff().map(|d| model.redact_sensitive(&d)),
+                diff,
             });
             output_bytes += observation.len();
             messages.push(Message::tool(observation.clone(), &call.id));
@@ -688,7 +709,9 @@ fn run_loop(
         steps,
         total_input_tokens,
         total_output_tokens,
+        last_input_tokens,
         messages,
+        tool_outcomes,
         summary: Some(summary),
         verification,
         no_progress,

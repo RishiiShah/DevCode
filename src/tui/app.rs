@@ -385,7 +385,17 @@ impl App {
                 }
             }
             Ev::Models(result) => self.on_models(result),
-            Ev::Conversations(list) => {
+            Ev::Conversations(mut list) => {
+                let mut counts: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for (label, _) in &list {
+                    *counts.entry(label.clone()).or_default() += 1;
+                }
+                for (label, id) in &mut list {
+                    if counts.get(label).copied().unwrap_or(0) > 1 {
+                        label.push_str(&format!(" · #{id}"));
+                    }
+                }
                 let open = matches!(
                     self.modal,
                     Some(Modal::Picker {
@@ -407,7 +417,7 @@ impl App {
                 }
                 self.conversations = list;
             }
-            Ev::Resumed(messages) => self.on_resumed(&messages),
+            Ev::Resumed(loaded) => self.on_resumed(&loaded),
         }
     }
 
@@ -424,14 +434,26 @@ impl App {
     }
 
     /// Rebuilds the transcript from a saved conversation, as Codex and Claude Code replay it.
-    fn on_resumed(&mut self, messages: &[crate::agent::Message]) {
+    fn on_resumed(&mut self, loaded: &crate::conversation::LoadedConversation) {
         use crate::agent::Role;
+        use std::collections::{HashMap, HashSet};
         self.items.clear();
         self.items.push(Item::Welcome);
         self.expanded_tool = None;
         self.scroll = 0;
+        self.total_in = loaded.total_in;
+        self.total_out = loaded.total_out;
+        self.context_used = loaded.context_used;
+
+        let tool_results: HashMap<&str, &crate::agent::Message> = loaded
+            .messages
+            .iter()
+            .filter_map(|m| m.tool_call_id.as_deref().map(|id| (id, m)))
+            .collect();
+        let mut consumed_results: HashSet<&str> = HashSet::new();
+
         let mut prompts = 0;
-        for message in messages {
+        for message in &loaded.messages {
             match message.role {
                 Role::User if message.tool_call_id.is_none() => {
                     prompts += 1;
@@ -446,16 +468,39 @@ impl App {
                             name: call.name.clone(),
                             summary: crate::agent::loop_runner::call_summary(&call.arguments),
                         });
+                        if let Some(res) = tool_results.get(call.id.as_str()) {
+                            consumed_results.insert(call.id.as_str());
+                            let outcome = loaded.tool_outcomes.get(&call.id);
+                            let preview = crate::agent::preview_lines(&res.content);
+                            let ok = outcome.map(|o| o.ok).unwrap_or_else(|| {
+                                !res.content
+                                    .trim_start()
+                                    .to_ascii_lowercase()
+                                    .starts_with("error")
+                            });
+                            let diff = outcome.and_then(|o| o.diff.clone());
+                            self.items.push(Item::ToolResult { ok, preview, diff });
+                        }
                     }
                 }
                 Role::Tool | Role::User => {
-                    let first = message.content.lines().next().unwrap_or("").to_string();
-                    let ok = !first.to_ascii_lowercase().starts_with("error");
-                    self.items.push(Item::ToolResult {
-                        ok,
-                        preview: first,
-                        diff: None,
-                    });
+                    if let Some(id) = message.tool_call_id.as_deref() {
+                        if consumed_results.contains(id) {
+                            continue;
+                        }
+                    }
+                    let preview = crate::agent::preview_lines(&message.content);
+                    let ok = !message
+                        .content
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("error");
+                    let diff = message
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|id| loaded.tool_outcomes.get(id))
+                        .and_then(|o| o.diff.clone());
+                    self.items.push(Item::ToolResult { ok, preview, diff });
                 }
                 _ => {}
             }
@@ -2262,7 +2307,9 @@ mod tests {
             steps: 3,
             total_input_tokens: 10,
             total_output_tokens: 4,
+            last_input_tokens: 10,
             messages: Vec::new(),
+            tool_outcomes: Default::default(),
             summary: Some(crate::discipline::TaskSummary {
                 steps: 3,
                 tokens_in: 10,
@@ -2349,34 +2396,80 @@ mod tests {
         let actions = a.on_key(key(KeyCode::Enter));
         assert!(matches!(&actions[..], [Action::Send(Cmd::Resume(id))] if id == "id-old"));
 
-        a.on_event(Ev::Resumed(vec![
-            Message::user("old work"),
-            Message::assistant(
-                "reading",
-                vec![ToolCall {
-                    id: "1".into(),
-                    thought_signature: None,
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.rs"}"#.into(),
-                }],
-            ),
-            Message::tool("fn main() {}", "1"),
-            Message::assistant("done", Vec::new()),
-        ]));
+        a.on_event(Ev::Resumed(Box::new(
+            crate::conversation::LoadedConversation {
+                id: "id-old".into(),
+                title: "old work".into(),
+                messages: vec![
+                    Message::user("old work"),
+                    Message::assistant(
+                        "reading",
+                        vec![
+                            ToolCall {
+                                id: "1".into(),
+                                thought_signature: None,
+                                name: "read_file".into(),
+                                arguments: r#"{"path":"a.rs"}"#.into(),
+                            },
+                            ToolCall {
+                                id: "2".into(),
+                                thought_signature: None,
+                                name: "read_file".into(),
+                                arguments: r#"{"path":"b.rs"}"#.into(),
+                            },
+                        ],
+                    ),
+                    Message::tool("fn main() {}", "1"),
+                    Message::tool("pub fn b() {}", "2"),
+                    Message::assistant("done", Vec::new()),
+                ],
+                tool_outcomes: Default::default(),
+                total_in: 420,
+                total_out: 80,
+                context_used: 300,
+            },
+        )));
+        assert_eq!((a.total_in, a.total_out, a.context_used), (420, 80, 300));
         assert!(matches!(a.items.first(), Some(Item::Welcome)));
         assert!(a
             .items
             .iter()
             .any(|i| matches!(i, Item::User(t) if t == "old work")));
-        assert!(a
+        // Tool calls and results are interleaved so view.rs groups consecutive calls like a live run.
+        let tool_idx = a
             .items
             .iter()
-            .any(|i| matches!(i, Item::Tool { name, summary } if name == "read_file" && summary == "a.rs")));
+            .position(|i| matches!(i, Item::Tool { name, summary } if name == "read_file" && summary == "a.rs"))
+            .expect("first tool");
+        assert!(matches!(
+            a.items.get(tool_idx + 1),
+            Some(Item::ToolResult { ok: true, .. })
+        ));
+        assert!(
+            matches!(a.items.get(tool_idx + 2), Some(Item::Tool { name, summary }) if name == "read_file" && summary == "b.rs")
+        );
+        assert!(matches!(
+            a.items.get(tool_idx + 3),
+            Some(Item::ToolResult { ok: true, .. })
+        ));
         assert!(a
             .items
             .iter()
             .any(|i| matches!(i, Item::Assistant(t) if t == "done")));
         assert!(matches!(a.items.last(), Some(Item::Note(t)) if t.contains("1 prompt")));
+    }
+
+    #[test]
+    fn resume_picker_disambiguates_duplicate_labels() {
+        let mut a = app();
+        let _ = a.open_resume();
+        a.on_event(Ev::Conversations(vec![
+            ("same title  · just now · 1 prompt".into(), "id-1".into()),
+            ("same title  · just now · 1 prompt".into(), "id-2".into()),
+        ]));
+        a.on_key(key(KeyCode::Down));
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(&actions[..], [Action::Send(Cmd::Resume(id))] if id == "id-2"));
     }
 
     #[test]
@@ -2687,7 +2780,9 @@ mod tests {
             steps: 1,
             total_input_tokens: 1,
             total_output_tokens: 1,
+            last_input_tokens: 1,
             messages: Vec::new(),
+            tool_outcomes: Default::default(),
             summary: None,
             verification: None,
             no_progress: None,
@@ -2985,7 +3080,9 @@ mod tests {
             steps: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            last_input_tokens: 0,
             messages: Vec::new(),
+            tool_outcomes: Default::default(),
             summary: None,
             verification: None,
             no_progress: None,

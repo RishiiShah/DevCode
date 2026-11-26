@@ -67,6 +67,11 @@ pub struct Session {
     /// Id and title under which the conversation is saved (`conversation`).
     conversation: String,
     title: String,
+    /// Persisted per-tool outcomes (`ok`, optional `diff`) and usage for resume fidelity.
+    tool_outcomes: std::collections::BTreeMap<String, agent::ToolOutcome>,
+    total_in: u64,
+    total_out: u64,
+    context_used: u64,
     /// Explicit context window configured before model switches (None = use model table / default).
     config_context_window: Option<u64>,
 }
@@ -128,6 +133,10 @@ impl Session {
             steer: Default::default(),
             conversation: conversation::new_id(),
             title: String::new(),
+            tool_outcomes: Default::default(),
+            total_in: 0,
+            total_out: 0,
+            context_used: 0,
             config_context_window,
         }
     }
@@ -154,7 +163,19 @@ impl Session {
         )
         .map_err(|e| DevCodeError::Config(e.to_string()));
         match &result {
-            Ok(run) => self.history = run.messages.clone(),
+            Ok(run) => {
+                self.history = run.messages.clone();
+                self.tool_outcomes.extend(
+                    run.tool_outcomes
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
+                self.total_in = self.total_in.saturating_add(run.total_input_tokens);
+                self.total_out = self.total_out.saturating_add(run.total_output_tokens);
+                if run.last_input_tokens > 0 {
+                    self.context_used = run.last_input_tokens;
+                }
+            }
             Err(e) => {
                 // The run's own messages are lost with the error; keep the request and the
                 // failure so the next turn ("continue") still knows what was asked.
@@ -170,7 +191,18 @@ impl Session {
             self.title = conversation::title_for(prompt);
         }
         // Saving is best effort: a full disk must not fail the turn that already ran.
-        let _ = conversation::save(&self.root, &self.conversation, &self.title, &self.history);
+        let _ = conversation::save_with_meta(
+            &self.root,
+            &self.conversation,
+            &self.title,
+            &self.history,
+            &self.tool_outcomes,
+            conversation::ConversationUsage {
+                total_in: self.total_in,
+                total_out: self.total_out,
+                context_used: self.context_used,
+            },
+        );
         result
     }
 
@@ -179,6 +211,10 @@ impl Session {
         self.history.clear();
         self.conversation = conversation::new_id();
         self.title.clear();
+        self.tool_outcomes.clear();
+        self.total_in = 0;
+        self.total_out = 0;
+        self.context_used = 0;
     }
 
     /// Saved conversations for this project, newest first.
@@ -189,6 +225,14 @@ impl Session {
     /// Continues a saved conversation: its messages become the history of the next prompt.
     /// An empty `id` picks the most recent one.
     pub fn resume(&mut self, id: &str) -> Result<Vec<agent::Message>, DevCodeError> {
+        Ok(self.resume_full(id)?.messages)
+    }
+
+    /// Continues a saved conversation and returns full transcript metadata for UI replay.
+    pub fn resume_full(
+        &mut self,
+        id: &str,
+    ) -> Result<conversation::LoadedConversation, DevCodeError> {
         let id = if id.is_empty() {
             self.conversations()
                 .first()
@@ -199,13 +243,17 @@ impl Session {
         } else {
             id.to_string()
         };
-        let (id, title, mut messages) =
-            conversation::load(&self.root, &id).map_err(|e| DevCodeError::Config(e.to_string()))?;
-        close_dangling_tool_calls(&mut messages);
-        self.history = messages.clone();
-        self.conversation = id;
-        self.title = title;
-        Ok(messages)
+        let mut loaded = conversation::load_full(&self.root, &id)
+            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        close_dangling_tool_calls(&mut loaded.messages);
+        self.history = loaded.messages.clone();
+        self.conversation = loaded.id.clone();
+        self.title = loaded.title.clone();
+        self.tool_outcomes = loaded.tool_outcomes.clone();
+        self.total_in = loaded.total_in;
+        self.total_out = loaded.total_out;
+        self.context_used = loaded.context_used;
+        Ok(loaded)
     }
     /// Re-reads `.devcode.json` and rebuilds the model; keeps tools and approval state.
     pub fn reload(&mut self, cli: &Cli) -> Result<(), DevCodeError> {
