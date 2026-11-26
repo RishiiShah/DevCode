@@ -97,7 +97,11 @@ impl Session {
         if build_model(provider.clone()).is_ok() {
             return None;
         }
-        let name = provider.connector.as_deref().unwrap_or("nim");
+        let connector = provider.connector.as_deref().unwrap_or("nim");
+        let name = credentials::config_dir()
+            .ok()
+            .and_then(|dir| credentials::selected_slot_name(&dir, connector).ok())
+            .unwrap_or_else(|| connector.to_owned());
         Some(format!(
             "No API key for {name}. Run /connect (or: devcode auth login {name})."
         ))
@@ -252,6 +256,13 @@ impl Session {
         let active = settings.active_slot.as_deref().or(connector);
         Ok(credentials::account_lines(&entries, active))
     }
+    /// True when a non-empty stored key is selected for `connector` (env not considered).
+    pub fn has_stored_key(&self, connector: &str) -> bool {
+        credentials::config_dir()
+            .ok()
+            .and_then(|dir| credentials::stored_key(&dir, connector).ok().flatten())
+            .is_some()
+    }
     pub fn connect(&mut self, name: Option<&str>) -> Result<(), DevCodeError> {
         use std::io::IsTerminal;
         self.connect_with(name, std::io::stdin().is_terminal(), || {
@@ -280,15 +291,22 @@ impl Session {
                 "/connect requires a TTY for hidden input".into(),
             ));
         }
-        let name = name
-            .map(str::to_owned)
-            .or_else(|| provider.connector.clone())
-            .ok_or_else(|| DevCodeError::Config("connector name required".into()))?;
-        let named_slot = credentials::parse_slot(&name).is_some();
-        let connector = credentials::connector_of(&name).to_owned();
         let dir = credentials::config_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
         credentials::ensure_outside_workspace(&self.root, &dir)
             .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        let name = match name {
+            Some(n) => n.to_owned(),
+            None => {
+                let connector = provider
+                    .connector
+                    .clone()
+                    .ok_or_else(|| DevCodeError::Config("connector name required".into()))?;
+                credentials::selected_slot_name(&dir, &connector)
+                    .map_err(|e| DevCodeError::Config(e.to_string()))?
+            }
+        };
+        let named_slot = credentials::parse_slot(&name).is_some();
+        let connector = credentials::connector_of(&name).to_owned();
         let mut entries =
             credentials::load(&dir).map_err(|e| DevCodeError::Config(e.to_string()))?;
         let key = read()?;
@@ -297,13 +315,25 @@ impl Session {
         }
         entries.insert(name.clone(), key);
         credentials::save(&dir, &entries).map_err(|e| DevCodeError::Config(e.to_string()))?;
-        provider.connector = Some(connector);
+        provider.connector = Some(connector.clone());
         // Match /provider: remember this account as the user default (best-effort).
         // Slot selection follows that write so persist_provider cannot drop it.
         let _ = crate::settings::persist_provider(&dir, &provider);
         if named_slot {
             crate::settings::set_active_slot(&dir, Some(&name))
                 .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        } else {
+            // Plain /connect saves the default slot; a selected alias for this connector would shadow it.
+            let active = crate::settings::load_user_settings(&dir)
+                .map_err(|e| DevCodeError::Config(e.to_string()))?
+                .active_slot;
+            if active
+                .as_deref()
+                .is_some_and(|slot| credentials::selected_key(Some(slot), &connector) != connector)
+            {
+                crate::settings::set_active_slot(&dir, None)
+                    .map_err(|e| DevCodeError::Config(e.to_string()))?;
+            }
         }
         self.model = build_model(provider.clone())?;
         self.config.provider = Some(provider);

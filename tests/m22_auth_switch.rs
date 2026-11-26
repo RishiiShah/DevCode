@@ -363,3 +363,60 @@ fn connect_named_slot_stores_the_key_and_selects_the_base_connector() {
         Some("nim")
     );
 }
+
+#[test]
+fn plain_connect_clears_a_shadowing_slot_and_bare_connect_follows_the_slot() {
+    let _guard = env_lock();
+    std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
+    let root = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let dir = storage.path().join("config");
+    std::env::set_var("DEVCODE_CONFIG_DIR", &dir);
+    let mut session = Session::new(
+        root.path().to_path_buf(),
+        Config {
+            provider: Some(ProviderConfig {
+                kind: ProviderKind::OpenaiCompat,
+                base_url: "http://127.0.0.1:9".into(),
+                api_key_env: String::new(),
+                connector: Some("nim".into()),
+                model: "fake".into(),
+                context_window: 1000,
+                max_rpm: None,
+                extra_body: Default::default(),
+            }),
+            ..Default::default()
+        },
+        Profile::Ask,
+        Box::new(devcode::agent::ScriptedModel::new(vec![])),
+        devcode::agent::ToolRegistry::new(),
+    );
+    session
+        .connect_with(Some("nim:work"), true, || Ok("work-key".into()))
+        .unwrap();
+    // Bare /connect refreshes the selected slot, not the plain key.
+    session
+        .connect_with(None, true, || Ok("work-key-2".into()))
+        .unwrap();
+    let stored = load(&dir).unwrap();
+    assert_eq!(
+        stored.get("nim:work").map(String::as_str),
+        Some("work-key-2")
+    );
+    assert!(!stored.contains_key("nim"));
+    // Plain /connect nim saves the default key and drops the shadowing slot selection.
+    session
+        .connect_with(Some("nim"), true, || Ok("plain-key".into()))
+        .unwrap();
+    assert_eq!(
+        load_user_settings(&dir).unwrap().active_slot.as_deref(),
+        None
+    );
+    assert_eq!(
+        devcode::credentials::stored_key(&dir, "nim")
+            .unwrap()
+            .as_deref(),
+        Some("plain-key")
+    );
+    assert!(session.has_stored_key("nim"));
+}
