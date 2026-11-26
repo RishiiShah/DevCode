@@ -870,6 +870,13 @@ impl Model for Anthropic {
     }
 
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
+        self.model_catalog()
+            .map(|models| models.into_iter().map(|(id, _)| id).collect())
+    }
+
+    fn model_catalog(
+        &self,
+    ) -> Result<Vec<(String, crate::capabilities::ModelCapabilities)>, ModelError> {
         let url = format!("{}/models", api_root(&self.config.base_url));
         let beta = self.beta_header(false);
         let call = self.apply_headers(self.client.get(&url), beta.as_deref());
@@ -885,16 +892,27 @@ impl Model for Anthropic {
             }
             Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
         };
-        let mut ids: Vec<String> = value
+        let models: std::collections::BTreeMap<_, _> = value
             .get("data")
             .and_then(Value::as_array)
             .ok_or_else(|| ModelError::FormatError("model list has no data array".into()))?
             .iter()
-            .filter_map(|model| model.get("id").and_then(Value::as_str))
-            .map(str::to_owned)
+            .filter_map(|row| {
+                let id = row.get("id")?.as_str()?;
+                let caps = crate::capabilities::ModelCapabilities {
+                    context_window: row.get("max_input_tokens").and_then(Value::as_u64),
+                    max_output: row.get("max_tokens").and_then(Value::as_u64),
+                    reasoning_control: row
+                        .pointer("/capabilities/thinking/supported")
+                        .and_then(Value::as_bool),
+                    vision: row
+                        .pointer("/capabilities/image_input/supported")
+                        .and_then(Value::as_bool),
+                    ..Default::default()
+                };
+                Some((id.to_owned(), caps))
+            })
             .collect();
-        ids.sort();
-        ids.dedup();
-        Ok(ids)
+        Ok(models.into_iter().collect())
     }
 }

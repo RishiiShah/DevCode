@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod approval;
 pub mod auth;
+pub mod capabilities;
 pub mod cli;
 pub mod config;
 pub mod conversation;
@@ -74,6 +75,10 @@ pub struct Session {
     context_used: u64,
     /// Explicit context window configured before model switches (None = use model table / default).
     config_context_window: Option<u64>,
+    catalog: std::cell::RefCell<
+        std::collections::BTreeMap<(String, String), capabilities::ModelCapabilities>,
+    >,
+    stream_usage_downgrades: std::collections::BTreeSet<(String, String)>,
 }
 
 /// A turn cut short (cancel, step limit) can end on tool calls without results, which providers
@@ -138,16 +143,66 @@ impl Session {
             total_out: 0,
             context_used: 0,
             config_context_window,
+            catalog: Default::default(),
+            stream_usage_downgrades: Default::default(),
         }
     }
+    fn model_key(provider: &config::ProviderConfig) -> (String, String) {
+        (
+            format!(
+                "{}:{}:{}",
+                provider.kind.as_str(),
+                provider.connector.as_deref().unwrap_or_default(),
+                provider.base_url.trim_end_matches('/')
+            ),
+            provider.model.clone(),
+        )
+    }
+
+    pub fn model_capabilities(&self) -> Option<capabilities::CapabilityRecord> {
+        let provider = self.config.provider.as_ref()?;
+        let key = Self::model_key(provider);
+        let configured_key = provider
+            .connector
+            .as_deref()
+            .unwrap_or_else(|| provider.base_url.trim_end_matches('/'));
+        let empty = capabilities::ModelCapabilities::default();
+        let configured = self
+            .config
+            .model_capabilities
+            .get(configured_key)
+            .and_then(|models| models.get(&provider.model))
+            .unwrap_or(&empty);
+        let catalog = self.catalog.borrow();
+        let legacy_window = match provider.effective_context_window() {
+            (window, config::ContextWindowSource::Config) => Some(window),
+            _ => None,
+        };
+        Some(capabilities::resolve(
+            provider,
+            configured,
+            catalog.get(&key).unwrap_or(&empty),
+            legacy_window,
+            self.stream_usage_downgrades.contains(&key),
+        ))
+    }
+
     /// Runs one user turn on top of the conversation so far and records the turn in it.
     pub fn prompt(&mut self, prompt: &str) -> Result<agent::LoopResult, DevCodeError> {
+        let capabilities = self.model_capabilities();
+        if let Some(record) = &capabilities {
+            self.model
+                .set_stream_usage(record.values.streaming_usage != Some(false));
+        }
         let limits = agent::LoopLimits {
             history: self.history.clone(),
             context_window: self.context_window(),
             trace: self.trace,
             progress: self.progress.clone(),
-            stream: stream_enabled(std::env::var("DEVCODE_STREAM").ok().as_deref()),
+            stream: stream_enabled(std::env::var("DEVCODE_STREAM").ok().as_deref())
+                && capabilities
+                    .as_ref()
+                    .is_none_or(|c| c.values.streaming != Some(false)),
             cancel: Some(self.cancel.clone()),
             steer: Some(self.steer.clone()),
             ..Default::default()
@@ -162,6 +217,15 @@ impl Session {
             &self.config,
         )
         .map_err(|e| DevCodeError::Config(e.to_string()));
+        if let Some(provider) = &self.config.provider {
+            if self.model.stream_usage_rejected()
+                && self
+                    .stream_usage_downgrades
+                    .insert(Self::model_key(provider))
+            {
+                self.log_stream_usage_downgrade(provider);
+            }
+        }
         match &result {
             Ok(run) => {
                 self.history = run.messages.clone();
@@ -457,20 +521,58 @@ impl Session {
             "No API key for {name}. Run /connect to add one, or /provider to choose another provider."
         ))
     }
-    /// Configured context window of the current model, in tokens.
-    pub fn context_window(&self) -> Option<u64> {
-        self.config
-            .provider
-            .as_ref()
-            .map(|p| p.effective_context_window().0)
+    fn log_stream_usage_downgrade(&self, provider: &config::ProviderConfig) {
+        use std::io::Write as _;
+        let dir = state::dir(&self.root);
+        let result = std::fs::create_dir_all(&dir).and_then(|()| {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut log = options.open(dir.join("model-capabilities.jsonl"))?;
+            let entry = serde_json::json!({
+                "provider": provider.connector.as_deref().unwrap_or("custom"),
+                "model": provider.model,
+                "downgrade": "streaming_usage",
+                "reason": "provider rejected stream_options",
+            });
+            writeln!(log, "{entry}")
+        });
+        if let Err(error) = result {
+            eprintln!("Could not log model capability downgrade: {error}");
+        }
     }
 
-    /// Source of the active context window (`"config"`, `"model"`, or `"default"`).
+    /// Configured context window of the current model, in tokens.
+    pub fn context_window(&self) -> Option<u64> {
+        self.model_capabilities()?.values.context_window
+    }
+
+    /// Source of the active context window.
     pub fn context_window_source(&self) -> Option<&'static str> {
-        self.config
-            .provider
-            .as_ref()
-            .map(|p| p.effective_context_window().1.as_str())
+        self.model_capabilities()?
+            .sources
+            .get("context_window")
+            .copied()
+    }
+
+    pub fn capability_status(&self) -> Option<String> {
+        let record = self.model_capabilities()?;
+        let fields = serde_json::to_value(record.values).ok()?;
+        Some(
+            record
+                .sources
+                .into_iter()
+                .filter_map(|(name, source)| {
+                    let value = fields.get(name).filter(|value| !value.is_null())?;
+                    Some(format!("{name} {value} ({source})"))
+                })
+                .collect::<Vec<_>>()
+                .join(" · "),
+        )
     }
 
     /// Status line items saved by `/statusline`, if any.
@@ -533,10 +635,20 @@ impl Session {
     pub fn list_models(&self) -> Result<Vec<String>, DevCodeError> {
         let mut models = self
             .model
-            .list_models()
+            .model_catalog()
             .map_err(|e| DevCodeError::Config(e.to_string()))?;
-        models.retain(|id| config::is_chat_model(id));
-        Ok(models)
+        models.retain(|(id, _)| config::is_chat_model(id));
+        if let Some(provider) = &self.config.provider {
+            let base = Self::model_key(provider).0;
+            let mut catalog = self.catalog.borrow_mut();
+            catalog.retain(|(endpoint, _), _| endpoint != &base);
+            catalog.extend(
+                models
+                    .iter()
+                    .map(|(id, capabilities)| ((base.clone(), id.clone()), capabilities.clone())),
+            );
+        }
+        Ok(models.into_iter().map(|(id, _)| id).collect())
     }
     /// Switches the model id. Session only; `.devcode.json` is not rewritten.
     pub fn set_model(&mut self, id: &str) -> Result<Option<String>, DevCodeError> {

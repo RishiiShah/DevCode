@@ -127,6 +127,12 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub provider: Option<ProviderConfig>,
+    /// Overrides keyed by connector (or custom endpoint URL), then exact model ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_capabilities: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, crate::capabilities::ModelCapabilities>,
+    >,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

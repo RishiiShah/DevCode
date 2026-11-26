@@ -33,6 +33,13 @@ fn handle_plain_slash(line: &str, session: &mut devcode::Session) -> bool {
             }
             true
         }
+        "/status" => {
+            println!("{}", session.provider_label());
+            if let Some(status) = session.capability_status() {
+                println!("{status}");
+            }
+            true
+        }
         "/provider" => {
             match words.next() {
                 None => {

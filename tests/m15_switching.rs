@@ -182,3 +182,28 @@ fn session_list_models_filters_non_chat_entries() {
     );
     assert_eq!(s.list_models().unwrap(), vec!["gpt-4o", "claude-sonnet-4"]);
 }
+
+#[test]
+fn model_capabilities_override_the_bundled_window_for_one_model() {
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "provider": {"kind": "openai_compat", "connector": "openai", "model": "gpt-5"},
+        "model_capabilities": {
+            "openai": {"gpt-5": {"context_window": 123_456, "streaming": false}}
+        }
+    }))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::new(
+        dir.path().to_path_buf(),
+        cfg,
+        Profile::Ask,
+        Box::new(ScriptedModel::new(vec![])),
+        devcode::tools::registry(dir.path().to_path_buf(), false),
+    );
+    assert_eq!(s.context_window(), Some(123_456));
+    assert_eq!(s.context_window_source(), Some("config"));
+    s.set_model("gpt-4o").unwrap();
+    assert_eq!(s.context_window(), Some(128_000));
+    s.set_model("gpt-5").unwrap();
+    assert_eq!(s.context_window(), Some(123_456));
+}

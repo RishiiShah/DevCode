@@ -522,3 +522,42 @@ fn cancel_aborts_stalled_stream_immediately() {
     assert!(matches!(err, ModelError::Cancelled), "got {err}");
     assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
 }
+
+#[test]
+fn rejected_stream_usage_is_disabled_for_later_requests() {
+    let (url, requests) = serve(vec![
+        Reply::Bytes {
+            status: 400,
+            content_type: "application/json",
+            body: r#"{"error":{"param":"stream_options","message":"unsupported"}}"#.into(),
+        },
+        Reply::Sse(hello_events()),
+        Reply::Sse(hello_events()),
+    ]);
+    let model = devcode::agent::session::RateLimitedModel::new(
+        Box::new(OpenAiCompat::new(config(url)).unwrap()),
+        Duration::ZERO,
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            model
+                .complete_stream(&request(), &mut |_| {})
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("Hello")
+        );
+    }
+    assert!(model.stream_usage_rejected());
+    let sent = requests.lock().unwrap();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(
+        request_json(&sent[0])["stream_options"]["include_usage"],
+        true
+    );
+    for raw in &sent[1..] {
+        let body = request_json(raw);
+        assert_eq!(body["stream"], true);
+        assert!(body.get("stream_options").is_none());
+    }
+}

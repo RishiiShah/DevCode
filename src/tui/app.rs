@@ -155,6 +155,7 @@ pub struct App {
     /// Configured context window and the size of the latest request, for the status line.
     pub context_window: Option<u64>,
     pub context_source: Option<&'static str>,
+    pub capability_status: Option<String>,
     pub context_used: u64,
     /// Git branch of the working folder, read at start and after each run.
     pub branch: Option<String>,
@@ -305,6 +306,7 @@ impl App {
             dragging: false,
             context_window: None,
             context_source: None,
+            capability_status: None,
             context_used: 0,
             branch: git_branch(),
             statusline: STATUSLINE_ITEMS
@@ -382,7 +384,11 @@ impl App {
                 self.items.push(Item::Info(format!("now using {label}")));
                 self.provider = label;
             }
-            Ev::ContextSource(source) => self.context_source = source,
+            Ev::Capabilities(window, source, status) => {
+                self.context_window = window;
+                self.context_source = source;
+                self.capability_status = status;
+            }
             Ev::Efforts(levels) => {
                 if matches!(
                     self.modal,
@@ -692,7 +698,7 @@ impl App {
             ),
             (None, _) => "unknown window".into(),
         };
-        vec![
+        let mut lines = vec![
             format!(
                 "DevCode v{} · profile {}",
                 env!("CARGO_PKG_VERSION"),
@@ -711,7 +717,11 @@ impl App {
             ),
             format!("folder      {}", cwd.display()),
             format!("background  {} running (/ps)", self.bg_processes),
-        ]
+        ];
+        if let Some(status) = &self.capability_status {
+            lines.push(format!("capabilities {status}"));
+        }
+        lines
     }
 
     /// `/statusline` lists the items; `/statusline ITEM` shows or hides one and saves the set.
@@ -3478,7 +3488,7 @@ mod tests {
     fn status_command_lists_session_details() {
         let mut a = app();
         a.context_window = Some(128_000);
-        a.on_event(Ev::ContextSource(Some("model")));
+        a.on_event(Ev::Capabilities(a.context_window, Some("model"), None));
         type_str(&mut a, "/status");
         a.on_key(key(KeyCode::Enter));
         let text = format!("{:?}", a.items);

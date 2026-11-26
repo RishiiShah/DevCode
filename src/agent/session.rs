@@ -125,6 +125,17 @@ impl Model for RateLimitedModel {
     fn redact_sensitive(&self, text: &str) -> String {
         self.model.redact_sensitive(text)
     }
+    fn stream_usage_rejected(&self) -> bool {
+        self.model.stream_usage_rejected()
+    }
+    fn set_stream_usage(&self, enabled: bool) {
+        self.model.set_stream_usage(enabled);
+    }
+    fn model_catalog(
+        &self,
+    ) -> Result<Vec<(String, crate::capabilities::ModelCapabilities)>, ModelError> {
+        self.model.model_catalog()
+    }
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
         self.model.list_models()
     }

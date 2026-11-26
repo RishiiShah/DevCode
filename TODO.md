@@ -34,16 +34,17 @@ UPDATED        : 2026-11-26
 Handoff rules: one item per commit (`<type>: <what>`); stage named files only; never push. Gate before each commit: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`. TDD: failing test first. No live LLM runs (cost) unless the user says so.
 
 Goal (PRD §1.0, FR-7): best-practice enforcement, fewer tokens, transparent token reporting, on any user-connected model.
-0. **Capability record** (FR-7.7, RES-016) One record per (provider, model); source precedence; runtime downgrade with log. Do first: ledger, caching, budgets and tool fallback read it.
+0. **Capability record** (FR-7.7, ARCH §7.5) Source precedence, status, and streaming-usage downgrade landed. Native-tool and schema fallback tracked below.
 1. **Token ledger** (FR-7.1, FR-7.2) Normalized per-call ledger across Anthropic, OpenAI-compatible, Gemini; `missing` ≠ 0; per-category attribution in `/status`, end-of-task line, tool log. Check which adapters already parse usage and cache fields first. Test: Gate 9.
 2. **Enforce budgets** (FR-7.3) NFR-3/NFR-4 tests; per-provider estimate calibration; optional task cap.
 3. **Prompt caching** (FR-7.4) Stable prefix; per-adapter cache markers; hit-rate reporting.
-4. **Harness evidence** (FR-7.5, RES-015) Paired-task pilot across 2–3 providers plus fault fixtures. Measure pass rate, tokens, gate and rollback interventions before claiming peer superiority.
-5. **Provider connectivity, in parallel** P10a Anthropic live dogfood and P10b OAuth (adoption blocker). Defer P9, P10c, P10d, U14, U15, U18.
-6. **Rollback and release** Close concurrent GC and managed checkpoint collisions (ARCH §4.2). Rehearse release matrix, integrity (ARCH §6.3).
-7. **Runtime and project context** OS-backed shell containment (ARCH §6.1–§6.2). Bounded root project instructions before changing `/init`.
-8. **Harness capabilities** `debug` profile and read-only MCP; `security` profile (FR-5). Use ledger and pilot data to prioritize retrieval, compaction, session branching.
-9. **TUI follow-up** U3/U17, U13, U2a behind the above.
+4. **Tool-call fallback and egress** (FR-7.7, FR-7.6) Text tool protocol, schema downgrade, outbound preview, and private-path enforcement.
+5. **Harness evidence** (FR-7.5, RES-015) Paired-task pilot across 2–3 providers plus fault fixtures. Measure pass rate, tokens, gate and rollback interventions before claiming peer superiority.
+6. **Provider connectivity, in parallel** P10a Anthropic live dogfood and P10b OAuth (adoption blocker). Defer P9, P10c, P10d, U14, U15, U18.
+7. **Rollback and release** Close concurrent GC and managed checkpoint collisions (ARCH §4.2). Rehearse release matrix, integrity (ARCH §6.3).
+8. **Runtime and project context** OS-backed shell containment (ARCH §6.1–§6.2). Bounded root project instructions before changing `/init`.
+9. **Harness capabilities** `debug` profile and read-only MCP; `security` profile (FR-5). Use ledger and pilot data to prioritize retrieval, compaction, session branching.
+10. **TUI follow-up** U3/U17, U13, U2a behind the above.
 
 Landed on `feat/peer-bar-next`: P11, P12, S1, S2, U16b, U16 (`/compact`, `/export`), T1 (`m13_connect` PTY deadline). Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate, approvals, discipline, NIM live per RES-012). That is scaffolding, not peer parity.
 

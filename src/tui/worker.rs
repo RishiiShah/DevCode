@@ -53,7 +53,7 @@ pub enum Ev {
     /// Provider label and context window after a connect, reload or switch.
     Provider(String, Option<u64>),
     /// Source of the active context window (`config`, `model`, `default`).
-    ContextSource(Option<&'static str>),
+    Capabilities(Option<u64>, Option<&'static str>, Option<String>),
     Models(Result<Vec<String>, String>),
     /// Effort values the current model accepts (empty: none).
     Efforts(Vec<String>),
@@ -151,7 +151,15 @@ fn emit_provider(session: &Session, events: &Sender<Ev>) {
         session.provider_label(),
         session.context_window(),
     ));
-    let _ = events.send(Ev::ContextSource(session.context_window_source()));
+    emit_capabilities(session, events);
+}
+
+fn emit_capabilities(session: &Session, events: &Sender<Ev>) {
+    let _ = events.send(Ev::Capabilities(
+        session.context_window(),
+        session.context_window_source(),
+        session.capability_status(),
+    ));
 }
 
 fn switched(
@@ -171,6 +179,7 @@ fn switched(
 /// (same pattern as peer TUIs that populate a model picker on auth).
 fn prefetch_models(session: &Session, events: &Sender<Ev>) {
     let _ = events.send(Ev::Models(session.list_models().map_err(|e| e.to_string())));
+    emit_capabilities(session, events);
 }
 
 fn prefetch_if_ready(session: &Session, events: &Sender<Ev>) {
@@ -189,6 +198,7 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
                 Err(e) => Ev::Failed(e.to_string()),
             };
             let _ = events.send(ev);
+            emit_capabilities(session, events);
         }
         Cmd::SetProfile(profile) => session.profile = profile,
         Cmd::Connect { name, key } => {

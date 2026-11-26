@@ -53,6 +53,7 @@ pub fn run(cli: Cli) -> Result<(), DevCodeError> {
     }
     app.context_window = session.context_window();
     app.context_source = session.context_window_source();
+    app.capability_status = session.capability_status();
     if let Some(items) = session.statusline() {
         app.statusline = items;
     }

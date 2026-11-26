@@ -7,6 +7,7 @@ use super::sse::{
 use crate::config::ProviderConfig;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,8 @@ pub struct OpenAiCompat {
     key: String,
     client: ureq::Agent,
     last_request: Mutex<Option<Instant>>,
+    stream_usage_rejected: AtomicBool,
+    stream_usage_enabled: AtomicBool,
 }
 
 impl OpenAiCompat {
@@ -84,6 +87,8 @@ impl OpenAiCompat {
             config,
             key,
             last_request: Mutex::new(None),
+            stream_usage_rejected: AtomicBool::new(false),
+            stream_usage_enabled: AtomicBool::new(true),
             client: ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(10))
                 .timeout_read(Duration::from_secs(120))
@@ -313,7 +318,13 @@ impl OpenAiCompat {
     ) -> Result<Response, ModelError> {
         let mut body = self.request_body(req, None);
         body["stream"] = json!(true);
-        body["stream_options"] = json!({"include_usage": true});
+        if self.stream_usage_enabled.load(Ordering::Relaxed)
+            && !self.stream_usage_rejected.load(Ordering::Relaxed)
+        {
+            body["stream_options"] = json!({"include_usage": true});
+        } else if let Some(object) = body.as_object_mut() {
+            object.remove("stream_options");
+        }
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -339,6 +350,21 @@ impl OpenAiCompat {
             match rx.recv()? {
                 Some(HttpEvent::Json(value)) => {
                     return parse_chat_completion(&value, req).map(|(response, _)| response);
+                }
+                Some(HttpEvent::Status {
+                    code: 400,
+                    body: error,
+                    ..
+                }) if body.get("stream_options").is_some()
+                    && serde_json::from_str::<Value>(&error).is_ok_and(|value| {
+                        matches!(
+                            value.pointer("/error/param").and_then(Value::as_str),
+                            Some("stream_options" | "stream_options.include_usage")
+                        )
+                    }) =>
+                {
+                    self.stream_usage_rejected.store(true, Ordering::Relaxed);
+                    body.as_object_mut().unwrap().remove("stream_options");
                 }
                 Some(HttpEvent::Status { code: 400, .. }) => {
                     return self.complete_cancellable(req, cancel);
@@ -417,6 +443,14 @@ impl OpenAiCompat {
 }
 
 impl Model for OpenAiCompat {
+    fn stream_usage_rejected(&self) -> bool {
+        self.stream_usage_rejected.load(Ordering::Relaxed)
+    }
+
+    fn set_stream_usage(&self, enabled: bool) {
+        self.stream_usage_enabled.store(enabled, Ordering::Relaxed);
+    }
+
     fn redact_sensitive(&self, text: &str) -> String {
         self.redact(text)
     }
@@ -451,6 +485,13 @@ impl Model for OpenAiCompat {
         self.stream_via_channel(req, cancel, on_chunk)
     }
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
+        self.model_catalog()
+            .map(|models| models.into_iter().map(|(id, _)| id).collect())
+    }
+
+    fn model_catalog(
+        &self,
+    ) -> Result<Vec<(String, crate::capabilities::ModelCapabilities)>, ModelError> {
         let url = format!("{}/models", self.config.base_url.trim_end_matches('/'));
         let mut call = self.client.get(&url);
         if !self.key.is_empty() {
@@ -468,18 +509,40 @@ impl Model for OpenAiCompat {
             }
             Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
         };
-        let mut ids: Vec<String> = value
+        let models: std::collections::BTreeMap<_, _> = value
             .get("data")
             .and_then(Value::as_array)
             .ok_or_else(|| ModelError::FormatError("model list has no data array".into()))?
             .iter()
-            .filter_map(|m| m.get("id").and_then(Value::as_str))
-            // Gemini's compatibility endpoint prefixes ids with "models/".
-            .map(|id| id.strip_prefix("models/").unwrap_or(id).to_owned())
+            .filter_map(|row| {
+                let id = row.get("id")?.as_str()?;
+                let id = id.strip_prefix("models/").unwrap_or(id);
+                let parameters = row.get("supported_parameters").and_then(Value::as_array);
+                let supports = |name| {
+                    parameters.map(|items| items.iter().any(|item| item.as_str() == Some(name)))
+                };
+                let caps = crate::capabilities::ModelCapabilities {
+                    context_window: row.get("context_length").and_then(Value::as_u64),
+                    max_output: row
+                        .pointer("/top_provider/max_completion_tokens")
+                        .and_then(Value::as_u64),
+                    native_tools: supports("tools"),
+                    parallel_tools: supports("parallel_tool_calls"),
+                    reasoning_control: parameters.map(|items| {
+                        items.iter().any(|item| {
+                            matches!(item.as_str(), Some("reasoning" | "reasoning_effort"))
+                        })
+                    }),
+                    vision: row
+                        .pointer("/architecture/input_modalities")
+                        .and_then(Value::as_array)
+                        .map(|items| items.iter().any(|item| item.as_str() == Some("image"))),
+                    ..Default::default()
+                };
+                Some((id.to_owned(), caps))
+            })
             .collect();
-        ids.sort();
-        ids.dedup();
-        Ok(ids)
+        Ok(models.into_iter().collect())
     }
 }
 

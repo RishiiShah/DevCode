@@ -393,6 +393,18 @@ pub trait Model: Send + Sync {
         }
         self.complete_stream(req, &mut |delta| on_chunk(StreamChunk::Text(delta)))
     }
+    /// Whether the endpoint rejected streaming usage for this model.
+    fn stream_usage_rejected(&self) -> bool {
+        false
+    }
+    fn set_stream_usage(&self, _enabled: bool) {}
+    fn model_catalog(
+        &self,
+    ) -> Result<Vec<(String, crate::capabilities::ModelCapabilities)>, ModelError> {
+        self.list_models()
+            .map(|ids| ids.into_iter().map(|id| (id, Default::default())).collect())
+    }
+
     /// Model ids the backend offers, for the UI's model picker.
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
         Err(ModelError::Other(

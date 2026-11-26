@@ -331,3 +331,46 @@ fn list_models_reports_http_errors() {
         .unwrap_err();
     assert!(err.to_string().contains("HTTP 401"), "{err}");
 }
+
+#[test]
+fn catalog_window_overrides_bundled_window_and_preserves_user_precedence() {
+    let reply = r#"{"data":[{"id":"gpt-4o","context_length":200000,"top_provider":{"max_completion_tokens":4000}},{"id":"gpt-5","context_length":300000}]}"#;
+    let (url, _) = scripted_server(vec![(200, reply.into())]);
+    let mut provider = config(url.clone());
+    provider.model = "gpt-4o".into();
+    provider.context_window = 0;
+    let model = OpenAiCompat::new(provider.clone()).unwrap();
+    let mut cfg = devcode::Config {
+        provider: Some(provider),
+        ..Default::default()
+    };
+    cfg.model_capabilities.entry(url).or_default().insert(
+        "gpt-5".into(),
+        devcode::capabilities::ModelCapabilities {
+            context_window: Some(400_000),
+            ..Default::default()
+        },
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = devcode::Session::new(
+        dir.path().to_path_buf(),
+        cfg,
+        devcode::Profile::Ask,
+        Box::new(model),
+        devcode::tools::registry(dir.path().to_path_buf(), false),
+    );
+    assert_eq!(session.context_window(), Some(128_000));
+    assert_eq!(session.list_models().unwrap(), ["gpt-4o", "gpt-5"]);
+    assert_eq!(session.context_window(), Some(200_000));
+    assert_eq!(session.context_window_source(), Some("provider"));
+    assert_eq!(
+        session.model_capabilities().unwrap().values.max_output,
+        Some(4000)
+    );
+    session.set_model("gpt-5").unwrap();
+    assert_eq!(session.context_window(), Some(400_000));
+    assert_eq!(session.context_window_source(), Some("config"));
+    session.set_model("gpt-4o").unwrap();
+    assert_eq!(session.context_window(), Some(200_000));
+}
