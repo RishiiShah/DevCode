@@ -4,7 +4,7 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1000-ARCH
-REVISION       : 0.4.1-draft
+REVISION       : 0.4.2-draft
 STATUS         : Working Draft (Engineering Specification)
 AUTHOR         : DevCode Architecture Group
 OWNS           : Design mechanisms (how). Requirements, NFRs, gates: ATE-1001-PRD
@@ -87,12 +87,18 @@ When a rollback is triggered (via `devcode rollback` or gate failure rejection):
 Harness file tools (`write_file`, `edit_file`, `patch`) capture every mutation before write. Shell writes follow §6.4: every mutation-capable command runs after a guard-set snapshot (§6.4.5), so shell changes to non-ignored workspace files are restorable. Gitignored files, oversize files, and paths outside the workspace are not; do not advertise rollback for them.
 
 ### 4.2 Checkpoint Retention & Garbage Collection
-- Manifests and blob references live under `.devcode/manifests/<session_id>/`.
+- Manifests live under `<state>/manifests/<session_id>/` and blobs under `<state>/blobs/` (§4.3).
 - **Retention**: last 20 completed steps per session plus active or unresolved recovery steps.
 - **Expiration**: completed, inactive manifests older than 7 days are pruned on session initialization.
 - **Manual cleanup**: `devcode gc` purges eligible stale manifests and unreferenced blobs. Never evict a required backup to meet the disk budget; block new mutations if a checkpoint cannot be stored safely.
 
 ---
+
+### 4.3 Harness State Location
+- `<state>` = `$DEVCODE_STATE_DIR`, else `$XDG_DATA_HOME/devcode`, else `~/.local/share/devcode`, then `projects/<folder>-<sha256(canonical root)[..12]>/`. No home directory: `<root>/.devcode/`.
+- Holds `blobs/`, `manifests/`, `recovery/`, `recovered/`, `managed/`, `audit.log`, `trace.jsonl`, `conversations/` (saved conversations for `--continue`, `--resume`, `/resume`).
+- Outside the workspace so a shell command (`rm -rf .*`, `find -delete`) cannot delete the checkpoints rollback needs. Peers: gemini-cli `~/.gemini/history/<project>`, Codex `~/.codex/sessions`.
+- The `.devcode/` deny rules (§5.2, §6.4) stay for the fallback location and older workspaces. A missing blob loses that path's diff and rollback only; the run continues.
 
 ## 5.0 Deterministic Gatekeeper & Classification Protocol
 
@@ -107,7 +113,7 @@ To prevent the **"Gate Grades Itself" vulnerability** (the generating model labe
 6. **Bound Verification Results**: Record the checked diff hash, commands, and outcomes. Any later source, configuration, or test change invalidates affected results. A new test file alone is insufficient: the configured runner must discover and execute the behavior assertion successfully.
 
 ### 5.2 Append-Only, Tamper-Evident Audit Log
-Every bypass via `--skip-tests` or an explicit user instruction identifying the bypass appends a non-interactive record to `.devcode/audit.log`:
+Every bypass via `--skip-tests` or an explicit user instruction identifying the bypass appends a non-interactive record to `<state>/audit.log` (§4.3):
 ```json
 {
   "timestamp": "2026-11-23T15:25:00Z",
@@ -162,7 +168,7 @@ Tier 1 targets: macOS (arm64, x86_64), Linux (x86_64, aarch64; glibc and musl), 
 | Env stripping | Case-sensitive names | Case-insensitive names | Match credential patterns case-insensitively on Windows |
 | Command execution | `sh -c` or argv | PowerShell or `cmd`; argv preferred | Prefer argv spawn over shell strings on every OS |
 | Network isolation | Linux: opt-in `bwrap`; macOS: none | None | Unchanged (§6.1) |
-| Config and cache | XDG dirs; `~/Library` on macOS | `%APPDATA%` / `%LOCALAPPDATA%` | Per-OS user dirs; harness state stays in repo `.devcode/` |
+| Config and cache | XDG dirs; `~/Library` on macOS | `%APPDATA%` / `%LOCALAPPDATA%` | Per-OS user dirs; harness state in the per-project state dir (§4.3) |
 
 Open items: native Windows availability of `semgrep`, `gitleaks`, `osv-scanner` is unverified (§7.3 missing-tool policy applies until it is). Windows runtime detail: `DEVCODE-RES-009`.
 
@@ -233,7 +239,7 @@ Pre-step capture of an unknown write set is solved by capturing the whole **guar
 
 **Snapshot procedure**:
 1. Fingerprint each guard-set path: type, size, mtime (ns), mode or Windows attributes.
-2. Hash and store bytes only for paths whose fingerprint differs from the session's last snapshot. The first snapshot reads every file; later ones are incremental. Blobs are content-addressed under `.devcode/` and shared with step manifests, so disk use stays under the NFR-7 ceiling.
+2. Hash and store bytes only for paths whose fingerprint differs from the session's last snapshot. The first snapshot reads every file; later ones are incremental. Blobs are content-addressed under `<state>/blobs/` (§4.3) and shared with step manifests, so disk use stays under the NFR-7 ceiling.
 3. Publish the pre-step record in the step manifest before spawning the command (FR-3.1 applies unchanged).
 
 **Budget**: at most 5,000 guard-set files and unique blob bytes within the NFR-7 ceiling (shared with manifests). Both numbers are untested starting values [guess]; NFR-9 sets the time limit. If the budget is exceeded or a file cannot be read (for example a Windows sharing violation), the command is blocked (FR-3.5). The user may approve running it **without rollback protection**; the harness appends `OVERRIDE_NO_SNAPSHOT` to the audit log (§5.2) listing the unprotected paths, and the step manifest marks the step `rollback: unavailable`.

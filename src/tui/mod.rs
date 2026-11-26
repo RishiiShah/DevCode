@@ -57,6 +57,23 @@ pub fn run(cli: Cli) -> Result<(), DevCodeError> {
     if prefetch {
         let _ = cmd_tx.send(Cmd::ListModels);
     }
+    // `--continue` takes the latest conversation, `--resume ID` that one, bare `--resume` a picker.
+    match cli.resume.as_deref() {
+        Some("") => {
+            for action in app.open_resume() {
+                if let Action::Send(cmd) = action {
+                    let _ = cmd_tx.send(cmd);
+                }
+            }
+        }
+        Some(id) => {
+            let _ = cmd_tx.send(Cmd::Resume(id.to_string()));
+        }
+        None if cli.continue_last => {
+            let _ = cmd_tx.send(Cmd::Resume(String::new()));
+        }
+        None => {}
+    }
 
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);

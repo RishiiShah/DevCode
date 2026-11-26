@@ -91,7 +91,7 @@ fn failed_post_snapshot_preserves_recovery_data() {
     .unwrap_err();
     assert!(error.to_string().contains("recovery snapshot retained"));
     let snapshot: devcode::manifest::GuardSetSnapshot = serde_json::from_slice(
-        &fs::read(temp.path().join(".devcode/recovery/recovery/1.json")).unwrap(),
+        &fs::read(devcode::state::dir(temp.path()).join("recovery/recovery/1.json")).unwrap(),
     )
     .unwrap();
     let hash = snapshot.files[Path::new("a")].sha256.as_ref().unwrap();
@@ -502,6 +502,8 @@ fn test_cli_rollback_subcommand_execution() {
         yes: false,
         trace: false,
         plain: false,
+        continue_last: false,
+        resume: None,
         command: Some(CliCommand::Rollback { step: None }),
         prompt: None,
     };

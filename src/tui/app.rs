@@ -71,6 +71,8 @@ pub enum PickKind {
     Provider,
     Effort,
     Command,
+    /// Saved conversations (`/resume`).
+    Conversation,
 }
 
 impl Modal {
@@ -157,6 +159,8 @@ pub struct App {
     pub branch: Option<String>,
     /// Items shown on the right of the status line, in order (`/statusline`).
     pub statusline: Vec<String>,
+    /// Saved conversations as (picker label, id) while the `/resume` picker is open.
+    pub conversations: Vec<(String, String)>,
     pub drag_edge: i8,
     /// First transcript row on screen, set by each draw.
     pub transcript_top: usize,
@@ -237,6 +241,7 @@ const HELP: &str = "Enter       send message or command (queued while a run work
 /status             model, context use, tokens, branch, folder
 /statusline [ITEM]  show or hide a status line item
 /clear              clear the screen and start a new conversation
+/resume [ID]        continue a saved conversation (devcode -c: latest)
 /exit               quit
 PgUp/PgDn           scroll transcript
 Ctrl-End            jump to latest (when scrolled up)
@@ -253,6 +258,7 @@ impl App {
     pub fn new(profile: Profile, provider: String, startup_note: Option<String>) -> Self {
         let mut app = Self {
             items: Vec::new(),
+            conversations: Vec::new(),
             input: String::new(),
             cursor: 0,
             scroll: 0,
@@ -375,7 +381,85 @@ impl App {
                 }
             }
             Ev::Models(result) => self.on_models(result),
+            Ev::Conversations(list) => {
+                let open = matches!(
+                    self.modal,
+                    Some(Modal::Picker {
+                        kind: PickKind::Conversation,
+                        ..
+                    })
+                );
+                if list.is_empty() {
+                    if open {
+                        self.modal = None;
+                    }
+                    self.items
+                        .push(Item::Info("no saved conversations in this folder".into()));
+                } else if let Some(Modal::Picker { items, loading, .. }) =
+                    self.modal.as_mut().filter(|_| open)
+                {
+                    *items = list.iter().map(|(label, _)| label.clone()).collect();
+                    *loading = false;
+                }
+                self.conversations = list;
+            }
+            Ev::Resumed(messages) => self.on_resumed(&messages),
         }
+    }
+
+    /// Opens the `/resume` picker; the worker fills it with saved conversations.
+    pub fn open_resume(&mut self) -> Vec<Action> {
+        self.modal = Some(Modal::Picker {
+            kind: PickKind::Conversation,
+            items: Vec::new(),
+            filter: String::new(),
+            selected: 0,
+            loading: true,
+        });
+        vec![Action::Send(Cmd::ListConversations)]
+    }
+
+    /// Rebuilds the transcript from a saved conversation, as Codex and Claude Code replay it.
+    fn on_resumed(&mut self, messages: &[crate::agent::Message]) {
+        use crate::agent::Role;
+        self.items.clear();
+        self.items.push(Item::Welcome);
+        self.expanded_tool = None;
+        self.scroll = 0;
+        let mut prompts = 0;
+        for message in messages {
+            match message.role {
+                Role::User if message.tool_call_id.is_none() => {
+                    prompts += 1;
+                    self.items.push(Item::User(message.content.clone()));
+                }
+                Role::Assistant => {
+                    if !message.content.trim().is_empty() {
+                        self.items.push(Item::Assistant(message.content.clone()));
+                    }
+                    for call in &message.tool_calls {
+                        self.items.push(Item::Tool {
+                            name: call.name.clone(),
+                            summary: crate::agent::loop_runner::call_summary(&call.arguments),
+                        });
+                    }
+                }
+                Role::Tool | Role::User => {
+                    let first = message.content.lines().next().unwrap_or("").to_string();
+                    let ok = !first.to_ascii_lowercase().starts_with("error");
+                    self.items.push(Item::ToolResult {
+                        ok,
+                        preview: first,
+                        diff: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        self.items.push(Item::Note(format!(
+            "Resumed conversation · {prompts} {}. Continue where you left off.",
+            plural(prompts, "prompt", "prompts")
+        )));
     }
 
     fn on_models(&mut self, result: Result<Vec<String>, String>) {
@@ -1115,6 +1199,15 @@ impl App {
                             PickKind::Effort => vec![Action::Send(Cmd::SetEffort(
                                 (value != "default").then_some(value),
                             ))],
+                            PickKind::Conversation => {
+                                let id = self
+                                    .conversations
+                                    .iter()
+                                    .find(|(label, _)| *label == value)
+                                    .map(|(_, id)| id.clone())
+                                    .unwrap_or_default();
+                                vec![Action::Send(Cmd::Resume(id))]
+                            }
                         };
                     }
                     KeyCode::Up => selected = selected.saturating_sub(1),
@@ -1396,7 +1489,7 @@ impl App {
             PickKind::Provider => Some(provider.to_string()),
             PickKind::Model => model.map(str::to_string),
             PickKind::Effort => Some(effort.unwrap_or("default").to_string()),
-            PickKind::Command => None,
+            PickKind::Command | PickKind::Conversation => None,
         }
     }
 
@@ -1570,6 +1663,15 @@ impl App {
                 ));
                 vec![Action::Send(Cmd::ClearHistory)]
             }
+            "resume" | "continue" => {
+                if busy {
+                    return busy_block(&mut self.items);
+                }
+                match arg {
+                    Some(id) => vec![Action::Send(Cmd::Resume(id.to_string()))],
+                    None => self.open_resume(),
+                }
+            }
             "help" | "?" => {
                 self.modal = Some(Modal::Help);
                 Vec::new()
@@ -1687,6 +1789,7 @@ pub fn command_about(name: &str) -> &'static str {
         "/status" => "model, context, tokens, branch and folder",
         "/statusline" => "choose what the status line shows",
         "/clear" => "start a new conversation",
+        "/resume" => "continue a saved conversation",
         "/help" => "keys and commands",
         "/exit" => "quit",
         _ => "",
@@ -1716,6 +1819,7 @@ pub fn slash_command_items() -> &'static [&'static str] {
         "/status",
         "/statusline",
         "/clear",
+        "/resume",
         "/help",
         "/exit",
     ]
@@ -2211,6 +2315,66 @@ mod tests {
             "nemo",
         );
         assert_eq!(modal.visible(), vec!["nvidia/nemotron-mini"]);
+    }
+
+    #[test]
+    fn resume_picker_lists_conversations_and_replays_the_chosen_one() {
+        use crate::agent::{Message, ToolCall};
+        let mut a = app();
+        let actions = a.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        drop(actions);
+        a.input = "/resume".into();
+        a.cursor = a.input.len();
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &actions[..],
+            [Action::Send(Cmd::ListConversations)]
+        ));
+        a.on_event(Ev::Conversations(vec![
+            ("fix the bug  · 2m ago · 1 prompt".into(), "id-new".into()),
+            ("old work  · 3d ago · 4 prompts".into(), "id-old".into()),
+        ]));
+        type_str(&mut a, "old");
+        let actions = a.on_key(key(KeyCode::Enter));
+        assert!(matches!(&actions[..], [Action::Send(Cmd::Resume(id))] if id == "id-old"));
+
+        a.on_event(Ev::Resumed(vec![
+            Message::user("old work"),
+            Message::assistant(
+                "reading",
+                vec![ToolCall {
+                    id: "1".into(),
+                    thought_signature: None,
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.rs"}"#.into(),
+                }],
+            ),
+            Message::tool("fn main() {}", "1"),
+            Message::assistant("done", Vec::new()),
+        ]));
+        assert!(matches!(a.items.first(), Some(Item::Welcome)));
+        assert!(a
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::User(t) if t == "old work")));
+        assert!(a
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Tool { name, summary } if name == "read_file" && summary == "a.rs")));
+        assert!(a
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Assistant(t) if t == "done")));
+        assert!(matches!(a.items.last(), Some(Item::Note(t)) if t.contains("1 prompt")));
+    }
+
+    #[test]
+    fn resume_with_nothing_saved_says_so() {
+        let mut a = app();
+        let _ = a.open_resume();
+        a.on_event(Ev::Conversations(Vec::new()));
+        assert!(a.modal.is_none());
+        assert!(matches!(a.items.last(), Some(Item::Info(t)) if t.contains("no saved")));
     }
 
     #[test]

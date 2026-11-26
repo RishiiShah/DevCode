@@ -31,6 +31,10 @@ pub enum Cmd {
     ClearHistory,
     /// Save the status line items (`/statusline`).
     SaveStatusline(Vec<String>),
+    /// Saved conversations for `/resume`.
+    ListConversations,
+    /// Continue a saved conversation; empty means the latest.
+    Resume(String),
 }
 
 pub enum Ev {
@@ -49,6 +53,10 @@ pub enum Ev {
     Efforts(Vec<String>),
     /// Managed background processes still running.
     Processes(usize),
+    /// Saved conversations as (picker label, id), newest first.
+    Conversations(Vec<(String, String)>),
+    /// A saved conversation was loaded; its messages rebuild the transcript.
+    Resumed(Vec<crate::agent::Message>),
 }
 
 pub struct ChannelWriter(pub Sender<Ev>);
@@ -181,6 +189,33 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
             }
         }
         Cmd::ClearHistory => session.clear_history(),
+        Cmd::ListConversations => {
+            let list = session
+                .conversations()
+                .into_iter()
+                .map(|c| {
+                    let label = format!(
+                        "{}  · {} · {} {}",
+                        if c.title.is_empty() {
+                            "(untitled)"
+                        } else {
+                            &c.title
+                        },
+                        crate::conversation::age(c.updated),
+                        c.turns,
+                        if c.turns == 1 { "prompt" } else { "prompts" }
+                    );
+                    (label, c.id)
+                })
+                .collect();
+            let _ = events.send(Ev::Conversations(list));
+        }
+        Cmd::Resume(id) => {
+            let _ = events.send(match session.resume(&id) {
+                Ok(messages) => Ev::Resumed(messages),
+                Err(e) => Ev::Failed(e.to_string()),
+            });
+        }
         Cmd::SaveStatusline(items) => {
             if let Err(e) = session.save_statusline(items) {
                 let _ = events.send(Ev::Failed(e.to_string()));

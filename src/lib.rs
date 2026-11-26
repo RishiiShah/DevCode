@@ -3,6 +3,7 @@ pub mod approval;
 pub mod auth;
 pub mod cli;
 pub mod config;
+pub mod conversation;
 pub mod credentials;
 pub mod discipline;
 pub mod gate;
@@ -63,6 +64,9 @@ pub struct Session {
     history: Vec<agent::Message>,
     /// Messages typed during a run; the loop reads them at its next step.
     pub steer: agent::SteerInbox,
+    /// Id and title under which the conversation is saved (`conversation`).
+    conversation: String,
+    title: String,
 }
 
 /// A turn cut short (cancel, step limit) can end on tool calls without results, which providers
@@ -111,6 +115,8 @@ impl Session {
             cancel,
             history: Vec::new(),
             steer: Default::default(),
+            conversation: conversation::new_id(),
+            title: String::new(),
         }
     }
     /// Runs one user turn on top of the conversation so far and records the turn in it.
@@ -148,12 +154,46 @@ impl Session {
             }
         }
         close_dangling_tool_calls(&mut self.history);
+        if self.title.is_empty() {
+            self.title = conversation::title_for(prompt);
+        }
+        // Saving is best effort: a full disk must not fail the turn that already ran.
+        let _ = conversation::save(&self.root, &self.conversation, &self.title, &self.history);
         result
     }
 
-    /// Forgets the conversation (`/clear`).
+    /// Forgets the conversation (`/clear`); the next prompt starts a new saved one.
     pub fn clear_history(&mut self) {
         self.history.clear();
+        self.conversation = conversation::new_id();
+        self.title.clear();
+    }
+
+    /// Saved conversations for this project, newest first.
+    pub fn conversations(&self) -> Vec<conversation::Summary> {
+        conversation::list(&self.root)
+    }
+
+    /// Continues a saved conversation: its messages become the history of the next prompt.
+    /// An empty `id` picks the most recent one.
+    pub fn resume(&mut self, id: &str) -> Result<Vec<agent::Message>, DevCodeError> {
+        let id = if id.is_empty() {
+            self.conversations()
+                .first()
+                .map(|s| s.id.clone())
+                .ok_or_else(|| {
+                    DevCodeError::Config("no saved conversation in this folder".into())
+                })?
+        } else {
+            id.to_string()
+        };
+        let (id, title, mut messages) =
+            conversation::load(&self.root, &id).map_err(|e| DevCodeError::Config(e.to_string()))?;
+        close_dangling_tool_calls(&mut messages);
+        self.history = messages.clone();
+        self.conversation = id;
+        self.title = title;
+        Ok(messages)
     }
     /// Re-reads `.devcode.json` and rebuilds the model; keeps tools and approval state.
     pub fn reload(&mut self, cli: &Cli) -> Result<(), DevCodeError> {
@@ -543,6 +583,10 @@ pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
     let tools = tools::registry(root.clone(), cli.yes);
     let mut session = Session::new(root, config, cli.profile, model, tools);
     session.trace = cli.trace;
+    if cli.continue_last || cli.resume.is_some() {
+        // Plain mode has no picker, so a bare `--resume` takes the latest, like `--continue`.
+        session.resume(cli.resume.as_deref().unwrap_or(""))?;
+    }
     match cli.prompt {
         Some(prompt) => session.prompt(&prompt).map(RunOutput::Prompt),
         None => Ok(RunOutput::Repl(session)),

@@ -33,10 +33,9 @@ UPDATED        : 2026-11-26
 ### 2.1 Next work order
 1. U13: full-screen TUI dogfood with a live provider. User dogfood found the streaming duplicates and the compaction wrong-question bug; unit tests and render previews did not.
 2. P11: real context window per model. The fixed 32k preset window made compaction run nearly every step.
-3. U16a: persist the conversation to disk; `/resume` builds on it.
-4. U2a remainder: streamed tool-argument UI, `--plain` streaming, live keyed run.
-5. P10a–P10d OAuth breadth (Anthropic/Codex OAuth, device code, keyring default): no user-hit gap yet; after 1–4.
-6. Sandbox toward Codex (bwrap / Seatbelt); A4 signing when the install path is real.
+3. U2a remainder: streamed tool-argument UI, `--plain` streaming, live keyed run.
+4. P10a–P10d OAuth breadth (Anthropic/Codex OAuth, device code, keyring default): no user-hit gap yet; after 1–3.
+5. Sandbox toward Codex (bwrap / Seatbelt); A4 signing when the install path is real.
 
 Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate, approvals, discipline, NIM live per RES-012). That is scaffolding, not peer parity.
 
@@ -79,8 +78,8 @@ Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate,
 - [ ] **U13** Interactive full-screen TUI dogfood with a live provider (not only `App` unit tests and `--plain`). Gap from RES-013.
 - [ ] **U14** Syntax highlighting & themes (bar: Codex, OpenCode, Mistral Vibe). *Missing*: `syntect` code-fence and diff highlighting in `src/tui/markdown.rs` and `src/tui/view.rs`, italics/links/task-lists, `/theme` picker, `OSC 11` light/dark background auto-detection.
 - [ ] **U15** Composer `@` mentions, `!` shell mode & editor ergonomics (bar: Codex, OpenCode, Pi, Gemini CLI). *Missing*: `@` fuzzy file-mention popup, `!` shell execution mode, `$EDITOR` prompt launch, `[paste #N]` collapse, clipboard image paste, `Ctrl-R` persistent history search, optional Vim mode.
-- [ ] **U16a** Persist the conversation to disk (in memory only today; quitting loses it). Prerequisite for U16.
-- [ ] **U16** Session & compaction UI (bar: OpenCode, Pi, Codex, Cline; `RES-005`). *Missing*: `/resume` (`/sessions`) picker, `/fork` (`/tree`) branching, `/compact` UI trigger (core in `src/discipline/compaction.rs`), `/export`, double-`Esc` prompt `/rewind`.
+- [x] **U16a** Conversations saved per prompt to `<state>/conversations/`; `devcode -c`, `--resume [ID]`, `/resume` picker replays the transcript (ARCH §4.3; `src/conversation.rs`, `tests/m28_resume.rs`). Harness state moved out of the workspace after `rm -rf` deleted `.devcode/blobs` (`tests/m27_snapshots.rs`).
+- [ ] **U16** Session & compaction UI (bar: OpenCode, Pi, Codex, Cline; `RES-005`). *Landed*: `/resume` picker (U16a). *Missing*: `/fork` (`/tree`) branching, `/compact` UI trigger (core in `src/discipline/compaction.rs`), `/export`, double-`Esc` prompt `/rewind`.
 - [ ] **U17** Approval, diff & tool-card depth (bar: OpenCode, Codex, Kimi Code, Stakpak). *Landed*: reject then type the correction, delivered mid-run (`SteerInbox`). *Missing*: scoped command-pattern always-allow rules, standalone `/diff` viewer (unified + split), expanding/collapsing arbitrary historical tool cards beyond latest `Ctrl-T`.
 - [ ] **U18** Terminal protocols & polish (bar: Codex, Pi, Mistral Vibe, OpenCode). *Missing*: synchronized output (`\x1b[?2026h`/`l`), transcript scrollbar thumb, double/triple-click selection, `OSC 8` clickable links, Kitty keyboard protocol, `OSC 9`/`777`/BEL completion alerts, `--no-alt-screen` inline scrollback mode.
 

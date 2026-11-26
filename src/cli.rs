@@ -39,6 +39,14 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub plain: bool,
 
+    /// Continue the most recent conversation in this folder
+    #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
+    pub continue_last: bool,
+
+    /// Resume a saved conversation by ID; without an ID, pick one from a list
+    #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 

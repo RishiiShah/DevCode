@@ -102,7 +102,7 @@ fn short(text: &str, max: usize) -> String {
 }
 
 /// One-line, content-free-ish description of a call: its path/pattern/command, never file bodies.
-fn call_summary(arguments: &str) -> String {
+pub fn call_summary(arguments: &str) -> String {
     let value: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
     for key in ["path", "command", "pattern", "query"] {
         if let Some(text) = value.get(key).and_then(|v| v.as_str()) {

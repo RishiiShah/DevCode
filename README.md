@@ -33,13 +33,13 @@ Specifications live under [`docs/`](docs/) in the **ATE-1000 series**. Each fact
 
 ## CLI and diagnostics
 
-Pass a prompt directly, for example `devcode --profile ask "where is the retry logic?"`. Use `devcode --plain` for the line-based REPL or `devcode rollback` to undo the latest run.
+Pass a prompt directly, for example `devcode --profile ask "where is the retry logic?"`. Use `devcode --plain` for the line-based REPL or `devcode rollback` to undo the latest run. Each conversation is saved per folder: `devcode -c` continues the latest, `devcode --resume` (or `/resume` in the TUI) picks one.
 
 For a custom OpenAI-compatible endpoint, set `base_url`, `api_key_env`, and a tool-capable `model` under `provider` in `.devcode.json`.
 
-`--trace` writes per-step timing and token counts (no file contents) to `.devcode/trace.jsonl`. Set `DEVCODE_STREAM=0` to disable TUI streaming. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
+`--trace` writes per-step timing and token counts (no file contents) to `trace.jsonl` in the project's state dir (`~/.local/share/devcode/projects/<folder>-<hash>/`, ARCH §4.3). Set `DEVCODE_STREAM=0` to disable TUI streaming. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
 
-Shell commands stop after 120 seconds. Long-running servers use the `start_process` / `stop_process` tools, which snapshot first, run in their own process group, and reconcile file changes on stop. If a command cannot be reconciled, its error names a retained `.devcode/recovery/<session>/<step>.json` snapshot. Run `devcode recover <session> <step>` to extract original files into `.devcode/recovered/<session>/<step>` without overwriting your working tree. Compare before restoring; the snapshot does not distinguish command changes from concurrent user changes or capture newly created paths.
+Shell commands stop after 120 seconds. Long-running servers use the `start_process` / `stop_process` tools, which snapshot first, run in their own process group, and reconcile file changes on stop. If a command cannot be reconciled, its error names a retained `recovery/<session>/<step>.json` snapshot in the state dir. Run `devcode recover <session> <step>` to extract original files into `recovered/<session>/<step>` there without overwriting your working tree. Compare before restoring; the snapshot does not distinguish command changes from concurrent user changes or capture newly created paths.
 
 ## Accounts and keys
 

@@ -1302,6 +1302,7 @@ fn draw_picker(frame: &mut Frame, screen: Rect, app: &App) {
         PickKind::Provider => ("Select provider", "providers"),
         PickKind::Effort => ("Reasoning effort", "levels"),
         PickKind::Command => ("Commands", "commands"),
+        PickKind::Conversation => ("Resume conversation", "conversations"),
     };
     let current = app.picker_current();
     let shown = modal.visible();
