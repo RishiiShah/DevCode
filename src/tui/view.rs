@@ -732,7 +732,9 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
         .bold();
     let dim = Style::new().add_modifier(Modifier::DIM);
     let visible: Vec<Line> = if app.input.is_empty() {
-        let hint = if busy {
+        let hint = if app.modal.is_some() {
+            ""
+        } else if busy {
             "Type to steer the run · Esc takes back the last message"
         } else {
             "Ask anything · / for commands · Shift+Tab switches profile"
@@ -1025,27 +1027,6 @@ fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
         w,
         h,
     )
-}
-
-fn diff_lines(text: &str) -> Vec<Line<'static>> {
-    text.lines()
-        .map(|l| {
-            let style = if l.starts_with("+++") || l.starts_with("---") {
-                Style::new().bold()
-            } else if l.starts_with('+') {
-                Style::new().fg(Color::Green)
-            } else if l.starts_with('-') {
-                Style::new().fg(Color::Red)
-            } else if l.starts_with("@@") {
-                Style::new().fg(Color::Cyan)
-            } else if l.contains("[y]es") || l.contains("justification") {
-                Style::new().bold().fg(Color::Yellow)
-            } else {
-                Style::new()
-            };
-            Line::styled(l.to_string(), style)
-        })
-        .collect()
 }
 
 /// What an approval question is about, read from the approval code's prompt text.
@@ -1405,6 +1386,131 @@ fn draw_picker(frame: &mut Frame, screen: Rect, app: &App) {
     );
 }
 
+fn dock_panel(frame: &mut Frame, screen: Rect, height: u16) -> Rect {
+    let height = height.min(screen.height.saturating_sub(1)).max(1);
+    let area = Rect::new(
+        screen.x,
+        screen.bottom().saturating_sub(height + 1),
+        screen.width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::new().fg(Color::Cyan))
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
+}
+
+fn dependency_manifest_path(text: &str) -> Option<&str> {
+    let (_, rest) = text.split_once("Dependency addition detected in '")?;
+    let (path, _) = rest.split_once('\'')?;
+    Some(path)
+}
+
+fn draw_docked_prompt(frame: &mut Frame, screen: Rect, modal: &Modal) {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let (title, body, hint): (Vec<Span<'static>>, Vec<Line<'static>>, &'static str) = match modal {
+        Modal::Text { text, input } => {
+            let (title, mut body) = if let Some(path) = dependency_manifest_path(text) {
+                (
+                    vec![
+                        Span::styled("Dependency addition", Style::new().bold().fg(Color::Yellow)),
+                        Span::styled(format!(" · {path}"), dim),
+                    ],
+                    vec![Line::raw(
+                        "Enter a one-line justification to approve adding this dependency:",
+                    )],
+                )
+            } else {
+                (
+                    vec![Span::styled("Input needed", Style::new().bold())],
+                    text.trim()
+                        .lines()
+                        .map(|l| Line::raw(l.to_string()))
+                        .collect(),
+                )
+            };
+            body.push(Line::raw(""));
+            if input.is_empty() {
+                body.push(Line::from(vec![
+                    Span::styled("› ", Style::new().bold().fg(Color::Cyan)),
+                    Span::styled("Type justification…", dim),
+                    Span::styled("▏", Style::new().fg(Color::Cyan)),
+                ]));
+            } else {
+                body.push(Line::from(vec![
+                    Span::styled("› ", Style::new().bold().fg(Color::Cyan)),
+                    Span::raw(input.clone()),
+                    Span::styled("▏", Style::new().fg(Color::Cyan)),
+                ]));
+            }
+            (title, body, "Enter submit · Esc reject")
+        }
+        Modal::Secret { name, input } => {
+            let label = name.as_deref().unwrap_or("the configured provider");
+            let body = vec![
+                Line::raw(format!("Paste or type the API key for {label}.")),
+                Line::styled(
+                    "Hidden here and stored in your user config directory, not in the repo.",
+                    dim,
+                ),
+                Line::raw(""),
+                Line::from(vec![
+                    Span::styled("key: ", Style::new().bold()),
+                    Span::raw("•".repeat(input.chars().count())),
+                    Span::styled("▏", Style::new().fg(Color::Cyan)),
+                ]),
+            ];
+            (
+                vec![
+                    Span::styled("Connect", Style::new().bold()),
+                    Span::styled(format!(" · {label}"), dim),
+                ],
+                body,
+                "Enter store · Esc cancel",
+            )
+        }
+        Modal::ConfirmRollback { step } => {
+            let what = match step {
+                Some(n) => format!("Restore files to the state before step {n}?"),
+                None => "Restore all files changed in the latest run?".to_string(),
+            };
+            (
+                vec![Span::styled(
+                    "Rollback",
+                    Style::new().bold().fg(Color::Yellow),
+                )],
+                vec![Line::raw(what)],
+                "y restore · n/Esc cancel",
+            )
+        }
+        _ => return,
+    };
+
+    let inner_width = screen.width.saturating_sub(2).max(1);
+    let body_widget = Paragraph::new(body).wrap(Wrap { trim: false });
+    let body_rows = (body_widget.line_count(inner_width) as u16).max(1);
+    let max_body = screen.height.saturating_sub(6).max(1);
+    let body_height = body_rows.min(max_body);
+    // Top border (1) + title (1) + gap (1) + body + gap (1) + hint (1).
+    let inner = dock_panel(frame, screen, body_height + 5);
+    let [head, _, body_area, _, hint_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(Paragraph::new(Line::from(title)), head);
+    let scroll = body_rows.saturating_sub(body_area.height);
+    frame.render_widget(body_widget.scroll((scroll, 0)), body_area);
+    frame.render_widget(Paragraph::new(Line::styled(hint, dim)), hint_area);
+}
+
 fn draw_modal(frame: &mut Frame, screen: Rect, app: &mut App) {
     let Some(modal) = &app.modal else { return };
     if matches!(modal, Modal::Approve { .. } | Modal::Confirm { .. }) {
@@ -1415,68 +1521,31 @@ fn draw_modal(frame: &mut Frame, screen: Rect, app: &mut App) {
         draw_picker(frame, screen, app);
         return;
     }
+    if matches!(
+        modal,
+        Modal::Text { .. } | Modal::Secret { .. } | Modal::ConfirmRollback { .. }
+    ) {
+        draw_docked_prompt(frame, screen, modal);
+        return;
+    }
     let area = centered(screen, 90, 75);
     frame.render_widget(Clear, area);
-    let (title, body, hint, scroll): (&str, Vec<Line>, &str, u16) = match modal {
-        Modal::Approve { .. } | Modal::Confirm { .. } => return,
-        Modal::Text { text, input } => {
-            let mut lines = diff_lines(text);
-            lines.push(Line::raw(""));
-            lines.push(Line::from(vec![
-                Span::styled("> ", Style::new().bold().fg(Color::Cyan)),
-                Span::raw(input.clone()),
-                Span::styled("▏", Style::new().fg(Color::Cyan)),
-            ]));
-            (" Input needed ", lines, " Enter: submit   Esc: reject ", 0)
-        }
-        Modal::Secret { name, input } => {
-            let label = name.as_deref().unwrap_or("the configured provider");
-            let lines = vec![
-                Line::raw(format!("Paste or type the API key for {label}.")),
-                Line::raw(
-                    "It is hidden here and stored in your user config directory, not in the repo.",
-                ),
-                Line::raw(""),
-                Line::from(vec![
-                    Span::styled("key: ", Style::new().bold()),
-                    Span::raw("•".repeat(input.chars().count())),
-                    Span::styled("▏", Style::new().fg(Color::Cyan)),
-                ]),
-            ];
-            (" Connect ", lines, " Enter: store   Esc: cancel ", 0)
-        }
-        Modal::ConfirmRollback { step } => {
-            let what = match step {
-                Some(n) => format!("Restore files to the state before step {n}?"),
-                None => "Restore all files changed in the latest run?".to_string(),
-            };
-            (
-                " Rollback ",
-                vec![Line::raw(what)],
-                " y: restore   n/Esc: cancel ",
-                0,
-            )
-        }
-        Modal::Picker { .. } => return,
-        Modal::Help => (
-            " Help ",
-            help_text()
-                .lines()
-                .map(|l| Line::raw(l.to_string()))
-                .collect(),
-            " any key: close ",
-            0,
-        ),
-    };
+    let body: Vec<Line> = help_text()
+        .lines()
+        .map(|l| Line::raw(l.to_string()))
+        .collect();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::new().fg(Color::DarkGray))
         .padding(ratatui::widgets::Padding::new(2, 2, 1, 0))
-        .title(Line::styled(title, Style::new().bold().fg(Color::Cyan)))
-        .title_bottom(Line::styled(hint, Style::new().add_modifier(Modifier::DIM)));
+        .title(Line::styled(" Help ", Style::new().bold().fg(Color::Cyan)))
+        .title_bottom(Line::styled(
+            " any key: close ",
+            Style::new().add_modifier(Modifier::DIM),
+        ));
     let paragraph = Paragraph::new(body).block(block).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph.scroll((scroll, 0)), area);
+    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
@@ -1603,15 +1672,13 @@ mod tests {
     }
 
     #[test]
-    fn diff_lines_keep_distinct_hunk_styles() {
-        let lines = diff_lines("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-removed\n+added\n context");
-        let style = |i: usize| ratatui::style::Styled::style(&lines[i]);
-        assert!(style(0).add_modifier.contains(Modifier::BOLD));
-        assert!(style(1).add_modifier.contains(Modifier::BOLD));
-        assert_eq!(style(2).fg, Some(Color::Cyan));
-        assert_eq!(style(3).fg, Some(Color::Red));
-        assert_eq!(style(4).fg, Some(Color::Green));
-        assert_eq!(style(5).fg, None);
+    fn numbered_diff_keeps_distinct_hunk_styles() {
+        let (lines, added, removed) =
+            numbered_diff("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-removed\n+added\n context");
+        assert_eq!((added, removed), (1, 1));
+        assert_eq!(lines[0].spans[1].style.fg, Some(Color::Red));
+        assert_eq!(lines[1].spans[1].style.fg, Some(Color::Green));
+        assert_eq!(lines[2].spans[1].style.fg, None);
     }
 
     #[test]
@@ -1702,6 +1769,30 @@ mod tests {
         assert!(screen.contains("gemini"));
         assert!(!screen.contains("AIzaSECRETKEY"));
         assert!(screen.contains("•••••••••••••"));
+    }
+
+    #[test]
+    fn dependency_text_modal_is_docked_compact_and_hides_steering_hint() {
+        let mut app = App::new(Profile::Build, "nim · m".into(), None);
+        app.status = Status::Working { step: 2 };
+        app.on_event(Ev::PromptText(
+            "Dependency addition detected in 'package.json'. Enter justification to approve: "
+                .into(),
+        ));
+        app.on_event(Ev::NeedInput);
+        let screen = render(&mut app, 100, 24);
+        assert!(
+            screen.contains("Dependency addition · package.json"),
+            "{screen}"
+        );
+        assert!(screen.contains("Enter submit · Esc reject"), "{screen}");
+        assert!(screen.contains("Type justification…"), "{screen}");
+        assert!(
+            !screen.contains("Type to steer the run"),
+            "docked prompt covers steering hint: {screen}"
+        );
+        // Compact bottom dock keeps the welcome card visible at the top.
+        assert!(screen.contains("DevCode"), "{screen}");
     }
 
     #[test]

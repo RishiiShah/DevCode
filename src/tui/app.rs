@@ -1173,7 +1173,17 @@ impl App {
                     self.modal = Some(Modal::Text { text, input });
                     Vec::new()
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    input.clear();
+                    self.modal = Some(Modal::Text { text, input });
+                    Vec::new()
+                }
+                KeyCode::Char(c)
+                    if !c.is_control()
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
                     input.push(c);
                     self.modal = Some(Modal::Text { text, input });
                     Vec::new()
