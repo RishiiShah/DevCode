@@ -173,16 +173,30 @@ fn status_reports_actual_exit_after_natural_exit() {
     let dir = tempfile::tempdir().unwrap();
     let tools = registry(dir.path(), "y\n");
     let port = free_port();
-    // Shell exits after the server is ready; the backgrounded server stays in the group.
-    let cmd = format!("{} & sleep 3; exit 7", server(port));
+    // Shell exits only after the test sees the server ready (a fixed sleep raced a slow
+    // python3 start on CI); the backgrounded server stays in the group.
+    let signal = tempfile::tempdir().unwrap();
+    let go = signal.path().join("go");
+    let cmd = format!(
+        "{} & while [ ! -f '{}' ]; do sleep 0.1; done; exit 7",
+        server(port),
+        go.display()
+    );
     start(&tools, &cmd, port, 30).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(3500));
-    let status = call(
-        &tools,
-        "process_status",
-        serde_json::json!({"id": "proc-1"}),
-    )
-    .unwrap();
+    std::fs::write(&go, "").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        let status = call(
+            &tools,
+            "process_status",
+            serde_json::json!({"id": "proc-1"}),
+        )
+        .unwrap();
+        if status.contains("stopped") || std::time::Instant::now() > deadline {
+            break status;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     assert!(status.contains("stopped (exit code 7)"), "{status}");
     assert!(!port_open(port), "group must be killed after leader exit");
 }
