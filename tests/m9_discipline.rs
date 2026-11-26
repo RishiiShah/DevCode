@@ -524,6 +524,66 @@ fn file_context_budget_applies_to_the_latest_turn_not_the_whole_history() {
     assert_ne!(result.exit_reason, ExitReason::ToolContextBudgetExceeded);
 }
 
+struct HugeRead;
+impl Tool for HugeRead {
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn description(&self) -> &str {
+        "huge read"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{}})
+    }
+    fn execute(&self, _arguments: &str) -> Result<String, String> {
+        Ok("y".repeat(60_000))
+    }
+}
+
+#[test]
+fn oversized_file_read_is_truncated_and_the_run_continues() {
+    let mut tools = ToolRegistry::new();
+    tools.register(HugeRead);
+    let read = |id: &str| Response {
+        text: None,
+        tool_calls: vec![ToolCall {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            thought_signature: None,
+        }],
+        usage: Usage::default(),
+    };
+    let model = ScriptedModel::new(vec![
+        Ok(read("r1")),
+        Ok(Response {
+            text: Some("done".into()),
+            tool_calls: vec![],
+            usage: Usage::default(),
+        }),
+    ]);
+    let result = run_agent_loop(
+        Profile::Ask,
+        &model,
+        &tools,
+        "explain",
+        &LoopLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(result.exit_reason, ExitReason::Completed);
+    let observation = result
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .unwrap();
+    assert!(
+        observation.content.len() < 21_000,
+        "{}",
+        observation.content.len()
+    );
+    assert!(observation.content.contains("truncated"));
+}
+
 #[test]
 fn task_token_cap_checks_spend_and_stops_before_another_request() {
     let dir = tempfile::tempdir().unwrap();

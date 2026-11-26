@@ -40,6 +40,9 @@ impl ExitReason {
     }
 }
 
+/// Per-turn ceiling for file and search results, below the 6,000-token NFR-4 budget (bytes / 4).
+const TURN_READ_LIMIT_BYTES: usize = 20_000;
+
 /// Live progress notifications for a UI. Never carries file contents beyond a short preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgressEvent {
@@ -675,6 +678,7 @@ fn run_loop(
         let tool_start = Instant::now();
         let wait_before = tools.approval_wait();
         let mut output_bytes = 0;
+        let mut read_bytes = 0usize;
         for call in &response.tool_calls {
             if limits.is_cancelled() {
                 break 'agent ExitReason::Cancelled;
@@ -763,6 +767,15 @@ fn run_loop(
                 preview: preview_lines(&observation),
                 diff,
             });
+            // NFR-4: cap file and search results ingested per turn; truncate instead of stopping the run.
+            let observation = if matches!(call.name.as_str(), "read_file" | "glob" | "grep") {
+                let room = TURN_READ_LIMIT_BYTES.saturating_sub(read_bytes).max(2_000);
+                let capped = crate::tools::cap::truncate_output(&observation, room);
+                read_bytes += capped.len();
+                capped
+            } else {
+                observation
+            };
             output_bytes += observation.len();
             messages.push(Message::tool(observation.clone(), &call.id));
             if let Some((root, config)) = context {
