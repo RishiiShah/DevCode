@@ -122,6 +122,7 @@ fn welcome_card(app: &App) -> Vec<Line<'static>> {
 enum ToolGroup {
     Explore,
     Run,
+    Edit,
 }
 
 fn tool_group(name: &str) -> Option<ToolGroup> {
@@ -130,6 +131,7 @@ fn tool_group(name: &str) -> Option<ToolGroup> {
             Some(ToolGroup::Explore)
         }
         "run_command" => Some(ToolGroup::Run),
+        "edit_file" | "write_file" => Some(ToolGroup::Edit),
         _ => None,
     }
 }
@@ -141,6 +143,9 @@ struct ToolRun<'a> {
     calls: Vec<usize>,
     end: usize,
     entries: Vec<(&'a str, &'a str, Option<bool>)>,
+    /// Lines added and removed across the run's edit diffs.
+    added: usize,
+    removed: usize,
 }
 
 fn tool_run(items: &[Item], start: usize) -> ToolRun<'_> {
@@ -153,6 +158,8 @@ fn tool_run(items: &[Item], start: usize) -> ToolRun<'_> {
         calls: Vec::new(),
         end: start,
         entries: Vec::new(),
+        added: 0,
+        removed: 0,
     };
     let mut j = start;
     while let Some(Item::Tool { name, summary }) = items.get(j) {
@@ -160,7 +167,14 @@ fn tool_run(items: &[Item], start: usize) -> ToolRun<'_> {
             break;
         }
         let result = match items.get(j + 1) {
-            Some(Item::ToolResult { ok, .. }) => Some(*ok),
+            Some(Item::ToolResult { ok, diff, .. }) => {
+                if let Some(diff) = diff {
+                    let (_, added, removed) = numbered_diff(diff);
+                    run.added += added;
+                    run.removed += removed;
+                }
+                Some(*ok)
+            }
             _ => None,
         };
         run.calls.push(j);
@@ -221,6 +235,22 @@ fn group_line(run: &ToolRun, dim: Style) -> Line<'static> {
             let verb = if running { "Exploring" } else { "Explored" };
             (verb, parts.join(", "), names.join(", "))
         }
+        ToolGroup::Edit => {
+            let mut files: Vec<&str> = Vec::new();
+            for (_, s, _) in &run.entries {
+                let name = s.rsplit('/').next().unwrap_or(s);
+                if !files.contains(&name) {
+                    files.push(name);
+                }
+            }
+            let n = files.len();
+            let verb = if running { "Editing" } else { "Edited" };
+            (
+                verb,
+                format!("{n} file{}", if n == 1 { "" } else { "s" }),
+                files.join(", "),
+            )
+        }
         ToolGroup::Run => {
             let n = run.entries.len();
             let verb = if running { "Running" } else { "Ran" };
@@ -249,6 +279,16 @@ fn group_line(run: &ToolRun, dim: Style) -> Line<'static> {
         Span::raw(counts),
         Span::styled(format!(" ({detail})"), dim),
     ];
+    if run.added + run.removed > 0 {
+        spans.push(Span::styled(
+            format!("  +{}", run.added),
+            Style::new().fg(Color::Green),
+        ));
+        spans.push(Span::styled(
+            format!(" −{}", run.removed),
+            Style::new().fg(Color::Red),
+        ));
+    }
     if failed > 0 {
         spans.push(Span::styled(
             format!("  {failed} failed"),
@@ -269,13 +309,13 @@ fn push_tool_card(
     dim: Style,
 ) {
     let result = match items.get(i + 1) {
-        Some(Item::ToolResult { ok, preview, .. }) => Some((*ok, preview)),
+        Some(Item::ToolResult { ok, preview, diff }) => Some((*ok, preview, diff)),
         _ => None,
     };
     let dot = match result {
         None => Color::Yellow,
-        Some((true, _)) => Color::Green,
-        Some((false, _)) => Color::Red,
+        Some((true, ..)) => Color::Green,
+        Some((false, ..)) => Color::Red,
     };
     lines.push(Line::from(vec![
         Span::styled("● ", Style::new().fg(dot)),
@@ -283,7 +323,8 @@ fn push_tool_card(
         Span::styled(format!("  {summary}"), dim),
     ]));
     match result {
-        Some((ok, preview)) => push_tool_result_lines(lines, ok, preview, expanded, dim),
+        Some((true, preview, Some(diff))) => push_diff_lines(lines, preview, diff, expanded, dim),
+        Some((ok, preview, _)) => push_tool_result_lines(lines, ok, preview, expanded, dim),
         None => lines.push(Line::styled("  ⎿  running…", dim)),
     }
 }
@@ -1817,6 +1858,13 @@ mod tests {
             preview: "Updated calc.py".into(),
             diff: Some("--- a/calc.py\n+++ b/calc.py\n@@ -3,3 +3,3 @@\n def add(a, b):\n-    return a - b\n+    return a + b\n \n".into()),
         });
+        let collapsed = render(&mut app, 80, 24);
+        assert!(
+            collapsed.contains("● Edited 1 file (calc.py)  +1 −1"),
+            "{collapsed}"
+        );
+        assert!(!collapsed.contains("return a - b"), "diff waits for Ctrl-T");
+        app.expanded_tool = Some(1);
         let screen = render(&mut app, 80, 24);
         assert!(
             screen.contains("⎿  Updated calc.py with 1 addition and 1 removal"),
