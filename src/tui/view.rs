@@ -2,6 +2,7 @@
 //! transcript area, and the mouse selection's text.
 use super::app::{
     help_text, App, ApprovalChoice, Item, Modal, PickKind, Status, CONFIRM_CHOICES, EDIT_CHOICES,
+    SCOPE_CHOICES,
 };
 use crate::Profile;
 use ratatui::{
@@ -1050,7 +1051,7 @@ fn approval_view(modal: &Modal) -> Option<ApprovalView> {
                         Span::styled(format!(" −{removed}"), Style::new().fg(Color::Red)),
                     ],
                     body,
-                    choices: CONFIRM_CHOICES,
+                    choices: SCOPE_CHOICES,
                 });
             }
             let question = text.trim_end().trim_end_matches("[y]es / [n]o:").trim_end();
@@ -1817,6 +1818,19 @@ mod tests {
         );
         // Compact bottom dock keeps the welcome card visible at the top.
         assert!(screen.contains("DevCode"), "{screen}");
+    }
+
+    #[test]
+    fn out_of_scope_confirm_shows_diff_and_apply_edit_label() {
+        let mut app = App::new(Profile::Build, "p".into(), None);
+        app.on_event(Ev::PromptText(
+            "--- a/About.tsx\n+++ b/About.tsx\n@@ -1 +1 @@\n-old\n+new\nEdit to 'About.tsx' is outside declared scope. Approve? [y]es / [n]o: ".into(),
+        ));
+        app.on_event(Ev::NeedInput);
+        let screen = render(&mut app, 100, 24);
+        assert!(screen.contains("Edit outside scope: About.tsx"), "{screen}");
+        assert!(screen.contains("Yes, apply this edit"), "{screen}");
+        assert!(!screen.contains("Yes, run it"), "{screen}");
     }
 
     #[test]

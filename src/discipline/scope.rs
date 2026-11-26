@@ -16,6 +16,13 @@ pub struct ScopeContract {
     pub state: Arc<Mutex<ScopeState>>,
 }
 
+fn normalize_scope_path(path: &Path, root: &Path) -> PathBuf {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect()
+}
+
 impl ScopeContract {
     pub fn new() -> Self {
         Self {
@@ -50,13 +57,13 @@ impl ScopeContract {
             return false;
         }
 
+        let norm_path = normalize_scope_path(path, root);
         let rel_path = path.strip_prefix(root).unwrap_or(path);
         st.declared_files.contains(rel_path)
             || st.declared_files.contains(path)
-            || st
-                .declared_files
-                .iter()
-                .any(|df| df == rel_path || df == path)
+            || st.declared_files.iter().any(|df| {
+                df == rel_path || df == path || normalize_scope_path(df, root) == norm_path
+            })
     }
 
     pub fn get_reason(&self) -> String {
@@ -133,5 +140,24 @@ impl Tool for DeclareScopeTool {
             paths.len(),
             reason
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScopeContract;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn scope_normalizes_dot_slash_and_root_prefix() {
+        let root = Path::new("/tmp/project");
+        let scope = ScopeContract::new();
+        scope.declare(
+            vec![PathBuf::from("./src/components/About.tsx")],
+            "style".into(),
+        );
+        assert!(scope.is_in_scope(Path::new("src/components/About.tsx"), root));
+        assert!(scope.is_in_scope(Path::new("/tmp/project/src/components/About.tsx"), root));
+        assert!(!scope.is_in_scope(Path::new("src/components/Hero.tsx"), root));
     }
 }

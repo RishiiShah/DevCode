@@ -227,6 +227,21 @@ pub const CONFIRM_CHOICES: &[ApprovalChoice] = &[
     },
 ];
 
+pub const SCOPE_CHOICES: &[ApprovalChoice] = &[
+    ApprovalChoice {
+        label: "Yes, apply this edit",
+        key: "y",
+        answer: "y",
+        note: "approved",
+    },
+    ApprovalChoice {
+        label: "No, and tell DevCode what to do instead",
+        key: "esc",
+        answer: "n",
+        note: "rejected; type what to do instead",
+    },
+];
+
 const HELP: &str = "Enter       send message or command (queued while a run works)
 /ask /plan /build   switch profile (ask and plan are read-only)
 /model [ID]         pick a model (catalog loads on connect/switch) or set one
@@ -1160,7 +1175,12 @@ impl App {
                 self.approval_key(Modal::Approve { text, scroll }, key.code, EDIT_CHOICES)
             }
             Modal::Confirm { text, scroll } => {
-                self.approval_key(Modal::Confirm { text, scroll }, key.code, CONFIRM_CHOICES)
+                let choices = if text.contains("outside declared scope") {
+                    SCOPE_CHOICES
+                } else {
+                    CONFIRM_CHOICES
+                };
+                self.approval_key(Modal::Confirm { text, scroll }, key.code, choices)
             }
             Modal::Text { text, mut input } => match key.code {
                 KeyCode::Enter => {
