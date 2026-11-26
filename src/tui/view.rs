@@ -117,6 +117,177 @@ fn welcome_card(app: &App) -> Vec<Line<'static>> {
     out
 }
 
+/// Tools whose consecutive calls collapse into one summary line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolGroup {
+    Explore,
+    Run,
+}
+
+fn tool_group(name: &str) -> Option<ToolGroup> {
+    match name {
+        "read_file" | "glob" | "grep" | "list_processes" | "process_status" => {
+            Some(ToolGroup::Explore)
+        }
+        "run_command" => Some(ToolGroup::Run),
+        _ => None,
+    }
+}
+
+/// A run of same-group tool calls starting at `start`: the Tool item indexes, the index just
+/// past the run, and per call (name, summary, result: None while running, Some(ok)).
+struct ToolRun<'a> {
+    kind: ToolGroup,
+    calls: Vec<usize>,
+    end: usize,
+    entries: Vec<(&'a str, &'a str, Option<bool>)>,
+}
+
+fn tool_run(items: &[Item], start: usize) -> ToolRun<'_> {
+    let Item::Tool { name, .. } = &items[start] else {
+        unreachable!("tool_run starts on a Tool item")
+    };
+    let kind = tool_group(name).expect("grouped tool");
+    let mut run = ToolRun {
+        kind,
+        calls: Vec::new(),
+        end: start,
+        entries: Vec::new(),
+    };
+    let mut j = start;
+    while let Some(Item::Tool { name, summary }) = items.get(j) {
+        if tool_group(name) != Some(kind) {
+            break;
+        }
+        let result = match items.get(j + 1) {
+            Some(Item::ToolResult { ok, .. }) => Some(*ok),
+            _ => None,
+        };
+        run.calls.push(j);
+        run.entries.push((name.as_str(), summary.as_str(), result));
+        j += if result.is_some() { 2 } else { 1 };
+    }
+    run.end = j;
+    run
+}
+
+fn group_line(run: &ToolRun, dim: Style) -> Line<'static> {
+    let running = run.entries.iter().any(|(.., r)| r.is_none());
+    let failed = run
+        .entries
+        .iter()
+        .filter(|(.., r)| *r == Some(false))
+        .count();
+    let dot = if running {
+        Color::Yellow
+    } else if failed > 0 {
+        Color::Red
+    } else {
+        Color::Green
+    };
+    let count = |pred: &dyn Fn(&str) -> bool| run.entries.iter().filter(|(n, ..)| pred(n)).count();
+    let (verb, counts, detail) = match run.kind {
+        ToolGroup::Explore => {
+            let files = count(&|n| n == "read_file");
+            let searches = count(&|n| n == "glob" || n == "grep");
+            let other = run.entries.len() - files - searches;
+            let mut parts = Vec::new();
+            if files > 0 {
+                parts.push(format!("{files} file{}", if files == 1 { "" } else { "s" }));
+            }
+            if searches > 0 {
+                parts.push(format!(
+                    "{searches} search{}",
+                    if searches == 1 { "" } else { "es" }
+                ));
+            }
+            if other > 0 {
+                parts.push(format!(
+                    "{other} check{}",
+                    if other == 1 { "" } else { "s" }
+                ));
+            }
+            let names: Vec<String> = run
+                .entries
+                .iter()
+                .map(|(n, s, _)| {
+                    if *n == "read_file" {
+                        s.rsplit('/').next().unwrap_or(s).to_string()
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .collect();
+            let verb = if running { "Exploring" } else { "Explored" };
+            (verb, parts.join(", "), names.join(", "))
+        }
+        ToolGroup::Run => {
+            let n = run.entries.len();
+            let verb = if running { "Running" } else { "Ran" };
+            let cmds: Vec<String> = run
+                .entries
+                .iter()
+                .map(|(_, s, _)| {
+                    let s: String = s.chars().take(32).collect();
+                    s
+                })
+                .collect();
+            (
+                verb,
+                format!("{n} command{}", if n == 1 { "" } else { "s" }),
+                cmds.join(" · "),
+            )
+        }
+    };
+    let mut detail: String = detail;
+    if detail.chars().count() > 60 {
+        detail = detail.chars().take(59).collect::<String>() + "…";
+    }
+    let mut spans = vec![
+        Span::styled("● ", Style::new().fg(dot)),
+        Span::styled(format!("{verb} "), Style::new().bold()),
+        Span::raw(counts),
+        Span::styled(format!(" ({detail})"), dim),
+    ];
+    if failed > 0 {
+        spans.push(Span::styled(
+            format!("  {failed} failed"),
+            Style::new().fg(Color::Red),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// One tool card with its full result, for an expanded group.
+fn push_tool_card(
+    lines: &mut Vec<Line<'static>>,
+    items: &[Item],
+    i: usize,
+    name: &str,
+    summary: &str,
+    expanded: bool,
+    dim: Style,
+) {
+    let result = match items.get(i + 1) {
+        Some(Item::ToolResult { ok, preview, .. }) => Some((*ok, preview)),
+        _ => None,
+    };
+    let dot = match result {
+        None => Color::Yellow,
+        Some((true, _)) => Color::Green,
+        Some((false, _)) => Color::Red,
+    };
+    lines.push(Line::from(vec![
+        Span::styled("● ", Style::new().fg(dot)),
+        Span::styled(name.to_string(), Style::new().bold()),
+        Span::styled(format!("  {summary}"), dim),
+    ]));
+    match result {
+        Some((ok, preview)) => push_tool_result_lines(lines, ok, preview, expanded, dim),
+        None => lines.push(Line::styled("  ⎿  running…", dim)),
+    }
+}
+
 /// Edit result as Claude Code shows it: a count line, then the numbered, tinted diff. Long
 /// diffs are cut to the first lines until the card is expanded (Ctrl-T).
 fn push_diff_lines(
@@ -231,6 +402,31 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
             Item::Assistant(text) => {
                 lines.push(Line::raw(""));
                 lines.extend(super::markdown::render(text));
+            }
+            Item::Tool { name, .. } if tool_group(name).is_some() => {
+                // Runs of reads, searches or commands collapse into one line, as Claude Code
+                // shows them ("Explored 2 files (a.rs, b.rs)"). Ctrl-T on the run expands it.
+                let group = tool_run(items, i);
+                if !group.calls.iter().any(|&c| expanded_tool == Some(c)) {
+                    if i == 0
+                        || !matches!(items[i - 1], Item::ToolResult { .. } | Item::Tool { .. })
+                    {
+                        lines.push(Line::raw(""));
+                    }
+                    lines.push(group_line(&group, dim));
+                    i = group.end;
+                    continue;
+                }
+                // Expanded: one card per call, the expanded one with its full output.
+                lines.push(Line::raw(""));
+                for &c in &group.calls {
+                    if let Item::Tool { name, summary } = &items[c] {
+                        let open = expanded_tool == Some(c);
+                        push_tool_card(&mut lines, items, c, name, summary, open, dim);
+                    }
+                }
+                i = group.end;
+                continue;
             }
             Item::Tool { name, summary } => {
                 let expanded = expanded_tool == Some(i);
@@ -1452,8 +1648,8 @@ mod tests {
         app.items.extend(sample_tool_items());
         app.expanded_tool = None;
         let screen = render(&mut app, 80, 20);
-        assert!(screen.contains("read_file"));
-        assert!(screen.contains("line-one-visible"));
+        assert!(screen.contains("● Explored 1 file (main.rs)"), "{screen}");
+        assert!(!screen.contains("line-one-visible"));
         assert!(!screen.contains("line-two-hidden"));
         assert!(!screen.contains("line-three-hidden"));
     }
@@ -1699,5 +1895,46 @@ mod tests {
         assert!(screen.contains("  ⎿  ● nim  stored  · active"), "{screen}");
         assert!(screen.contains("     ○ gemini  stored"), "{screen}");
         assert!(screen.contains("  · edit approved"), "{screen}");
+    }
+
+    #[test]
+    fn consecutive_reads_and_commands_collapse_into_summary_lines() {
+        let mut app = App::new(Profile::Build, "p".into(), None);
+        app.items.clear();
+        let call = |name: &str, summary: &str| Item::Tool {
+            name: name.into(),
+            summary: summary.into(),
+        };
+        let done = |ok| Item::ToolResult {
+            ok,
+            preview: "x".into(),
+            diff: None,
+        };
+        app.items.extend([
+            call("read_file", "src/tui/app.rs"),
+            done(true),
+            call("grep", "fn draw"),
+            done(true),
+            call("read_file", "src/tui/view.rs"),
+            done(true),
+            call("run_command", "ls -la docs"),
+            done(true),
+            call("run_command", "git status"),
+            done(false),
+            call("read_file", "TODO.md"),
+        ]);
+        let screen = render(&mut app, 100, 20);
+        assert!(
+            screen.contains("● Explored 2 files, 1 search (app.rs, fn draw, view.rs)"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("● Ran 2 commands (ls -la docs · git status)  1 failed"),
+            "{screen}"
+        );
+        assert!(screen.contains("● Exploring 1 file (TODO.md)"), "{screen}");
+        app.expanded_tool = Some(6);
+        let open = render(&mut app, 100, 30);
+        assert!(open.contains("run_command  ls -la docs"), "{open}");
     }
 }
