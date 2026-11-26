@@ -48,6 +48,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Extract a retained pre-command snapshot without modifying project files
+    Recover { session: String, step: usize },
     /// Manage stored provider credentials
     Auth {
         #[command(subcommand)]

@@ -400,6 +400,11 @@ pub enum RunOutput {
 
 pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
     let root = std::env::current_dir().map_err(|e| DevCodeError::Config(e.to_string()))?;
+    if let Some(Command::Recover { ref session, step }) = cli.command {
+        return manifest::recover_snapshot(&root, session, step)
+            .map(|path| RunOutput::Auth(vec![format!("Recovered files to {}", path.display())]))
+            .map_err(|e| DevCodeError::Config(e.to_string()));
+    }
     if let Some(Command::Auth { ref action }) = cli.command {
         return auth(&root, &cli, action).map(RunOutput::Auth);
     }

@@ -15,8 +15,9 @@ pub struct MutationContext {
     pub(crate) root: PathBuf,
     pub(crate) session: String,
     pub(crate) step: usize,
-    prompt: ApprovalPrompt<Box<dyn BufRead + Send>, Box<dyn Write + Send>>,
+    pub(crate) prompt: ApprovalPrompt<Box<dyn BufRead + Send>, Box<dyn Write + Send>>,
     pub(crate) log: ToolLog,
+    pub(crate) processes: super::managed::ManagedProcesses,
     scope: ScopeContract,
     pub(crate) approval_wait: Arc<Mutex<Duration>>,
 }
@@ -43,6 +44,7 @@ impl MutationContext {
                 always_approved: prompt.always_approved,
             },
             log: ToolLog::new(),
+            processes: Default::default(),
             scope: ScopeContract::new(),
             approval_wait,
         }
@@ -86,6 +88,7 @@ pub fn registry_with_context(context: MutationContext) -> ToolRegistry {
             context: Arc::clone(&shared),
         });
     }
+    super::managed::register(&mut tools, Arc::clone(&shared));
     tools
 }
 
@@ -127,7 +130,7 @@ impl Tool for MutationTool {
         match self.kind {
             Kind::Write => "Write a file with approval",
             Kind::Edit => "Replace one exact string with approval",
-            Kind::Command => "Run a guarded shell command",
+            Kind::Command => "Run a guarded shell command; stops after 120 seconds. Use start_process for development servers",
         }
     }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -162,10 +165,17 @@ impl Tool for MutationTool {
                 let result =
                     execute_guarded_command(root, &args.command, session, *step, 120, prompt, log)
                         .map_err(|e| e.to_string())?;
-                Ok(format!(
+                let output = format!(
                     "{}\nexit code: {:?}; timed out: {}",
                     result.stdout_stderr, result.exit_code, result.timed_out
-                ))
+                );
+                if result.timed_out {
+                    Err(format!("{output}\nCommand timed out and its process group was stopped. Start long-running servers in a separate terminal."))
+                } else if result.exit_code != Some(0) {
+                    Err(output)
+                } else {
+                    Ok(output)
+                }
             }
             kind => {
                 let (path, content) = match kind {

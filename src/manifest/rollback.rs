@@ -6,6 +6,97 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// Extracts a pre-command snapshot without overwriting the working tree.
+pub fn recover_snapshot(root: &Path, session: &str, step: usize) -> Result<PathBuf, ManifestError> {
+    if session.is_empty() || session == "." || session == ".." || session.contains(['/', '\\']) {
+        return Err(ManifestError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid session name",
+        )));
+    }
+    let source = root
+        .join(".devcode/recovery")
+        .join(session)
+        .join(format!("{step}.json"));
+    let data = fs::read(source).map_err(ManifestError::Io)?;
+    let snapshot: crate::manifest::GuardSetSnapshot =
+        serde_json::from_slice(&data).map_err(ManifestError::Serialization)?;
+    for (path, record) in &snapshot.files {
+        if path.as_os_str().is_empty()
+            || path
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(ManifestError::Conflict {
+                path: path.clone(),
+                reason: "invalid recovery path".into(),
+            });
+        }
+        if record.file_type == FileType::File {
+            let hash = record
+                .sha256
+                .as_ref()
+                .ok_or_else(|| ManifestError::Conflict {
+                    path: path.clone(),
+                    reason: "missing recovery blob".into(),
+                })?;
+            read_blob(root, hash)?;
+        }
+        if path
+            .ancestors()
+            .skip(1)
+            .any(|p| snapshot.files.contains_key(p))
+        {
+            return Err(ManifestError::Conflict {
+                path: path.clone(),
+                reason: "recovery path has a non-directory parent".into(),
+            });
+        }
+    }
+    let dest = root
+        .join(".devcode/recovered")
+        .join(session)
+        .join(step.to_string());
+    fs::create_dir_all(
+        dest.parent()
+            .ok_or_else(|| ManifestError::Io(std::io::Error::other("invalid destination")))?,
+    )
+    .map_err(ManifestError::Io)?;
+    fs::create_dir(&dest).map_err(ManifestError::Io)?;
+    for (path, record) in &snapshot.files {
+        let target = dest.join(path);
+        fs::create_dir_all(
+            target
+                .parent()
+                .ok_or_else(|| ManifestError::Io(std::io::Error::other("invalid path")))?,
+        )
+        .map_err(ManifestError::Io)?;
+        match record.file_type {
+            FileType::File => {
+                let hash = record
+                    .sha256
+                    .as_ref()
+                    .ok_or_else(|| ManifestError::Io(std::io::Error::other("missing blob")))?;
+                fs::write(&target, read_blob(root, hash)?).map_err(ManifestError::Io)?;
+                fs::set_permissions(&target, fs::Permissions::from_mode(record.mode))
+                    .map_err(ManifestError::Io)?;
+            }
+            FileType::Symlink => {
+                let link = record.symlink_target.as_ref().ok_or_else(|| {
+                    ManifestError::Io(std::io::Error::other("missing symlink target"))
+                })?;
+                symlink(link, &target).map_err(ManifestError::Io)?;
+            }
+            FileType::Dir => {
+                return Err(ManifestError::Io(std::io::Error::other(
+                    "unexpected directory",
+                )))
+            }
+        }
+    }
+    Ok(dest)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RollbackReport {
     pub restored_paths: Vec<PathBuf>,

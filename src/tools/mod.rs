@@ -1,6 +1,7 @@
 pub mod cap;
 pub mod glob;
 pub mod grep;
+pub mod managed;
 pub mod mutate;
 pub mod read;
 pub use mutate::{new_session_id, registry, registry_with_context, MutationContext};

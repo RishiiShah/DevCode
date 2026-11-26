@@ -182,6 +182,9 @@ pub fn run_bounded<S: AsRef<str>>(
     let reader_handle = thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
+            if reader_stop.load(Ordering::Relaxed) {
+                break;
+            }
             match reader_file.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {

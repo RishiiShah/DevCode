@@ -5,6 +5,7 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -123,6 +124,35 @@ pub fn snapshot_guard_set(
         // Per-file cap 10 MB: larger files are outside guard set (reported as unprotected)
         let size = meta.len();
         if size > MAX_PER_FILE_BYTES {
+            if previous.is_some_and(|p| p.files.contains_key(rel_path)) {
+                use sha2::{Digest, Sha256};
+                let mut file = fs::File::open(path).map_err(ManifestError::Io)?;
+                let mut hash = Sha256::new();
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let count = file.read(&mut buffer).map_err(ManifestError::Io)?;
+                    if count == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..count]);
+                }
+                current_files.insert(
+                    rel_path.to_path_buf(),
+                    FileFingerprint {
+                        file_type: FileType::File,
+                        size,
+                        mtime_ns: meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0),
+                        mode: meta.permissions().mode(),
+                        sha256: Some(format!("{:x}", hash.finalize())),
+                        symlink_target: None,
+                    },
+                );
+            }
             continue;
         }
 

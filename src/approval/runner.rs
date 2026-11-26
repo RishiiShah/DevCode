@@ -5,7 +5,7 @@ use crate::guard::path::check_write_path;
 use crate::guard::process::{run_bounded, DEFAULT_OUT_CAP};
 use crate::guard::GuardError;
 use crate::manifest::record::{capture, record_path, save_manifest, PathRecord, StepManifest};
-use crate::manifest::snapshot::{reconcile, snapshot_guard_set, ReconcileResult};
+use crate::manifest::snapshot::{reconcile, snapshot_guard_set, GuardSetSnapshot, ReconcileResult};
 use crate::manifest::ManifestError;
 use std::fmt;
 use std::fs;
@@ -29,6 +29,7 @@ pub enum ExecutionError {
     Process(GuardError),
     Manifest(ManifestError),
     Io(std::io::Error),
+    Recovery { path: PathBuf, reason: String },
 }
 
 impl fmt::Display for ExecutionError {
@@ -40,6 +41,7 @@ impl fmt::Display for ExecutionError {
             ExecutionError::Process(err) => write!(f, "process execution error: {}", err),
             ExecutionError::Manifest(err) => write!(f, "manifest error: {}", err),
             ExecutionError::Io(err) => write!(f, "I/O error: {}", err),
+            ExecutionError::Recovery { path, reason } => write!(f, "{reason}; pre-command recovery snapshot retained at {} (file contents are in .devcode/blobs)", path.display()),
         }
     }
 }
@@ -110,24 +112,82 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
     }
 
     let snap_before = snapshot_guard_set(root, None).map_err(ExecutionError::Snapshot)?;
+    let recovery_dir = root.join(".devcode/recovery").join(session_id);
+    fs::create_dir_all(&recovery_dir).map_err(ExecutionError::Io)?;
+    let recovery_path = recovery_dir.join(format!("{step_id}.json"));
+    let mut recovery = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&recovery_path)
+        .map_err(ExecutionError::Io)?;
+    serde_json::to_writer(&mut recovery, &snap_before)
+        .map_err(|e| ExecutionError::Io(std::io::Error::other(e)))?;
+    recovery.sync_all().map_err(ExecutionError::Io)?;
+    fs::File::open(&recovery_dir)
+        .and_then(|d| d.sync_all())
+        .map_err(ExecutionError::Io)?;
 
     let argv = ["sh", "-c", cmd_str];
     let timeout = Duration::from_secs(timeout_secs);
-    let res =
-        run_bounded(&argv, root, timeout, DEFAULT_OUT_CAP).map_err(ExecutionError::Process)?;
+    let res = run_bounded(&argv, root, timeout, DEFAULT_OUT_CAP).map_err(|e| {
+        ExecutionError::Recovery {
+            path: recovery_path.clone(),
+            reason: e.to_string(),
+        }
+    })?;
 
     let snap_after =
-        snapshot_guard_set(root, Some(&snap_before)).map_err(ExecutionError::Snapshot)?;
+        snapshot_guard_set(root, Some(&snap_before)).map_err(|e| ExecutionError::Recovery {
+            path: recovery_path.clone(),
+            reason: e.to_string(),
+        })?;
     let rec = reconcile(&snap_before, &snap_after);
-
-    let has_mutations =
-        !rec.created.is_empty() || !rec.modified.is_empty() || !rec.deleted.is_empty();
 
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
+    save_reconciled_changes(
+        root,
+        session_id,
+        step_id,
+        &snap_before,
+        &rec,
+        ts,
+        tool_log,
+        &recovery_path,
+    )?;
+    fs::remove_file(&recovery_path).map_err(ExecutionError::Io)?;
+    tool_log.record_command(
+        cmd_str,
+        if res.timed_out { None } else { res.exit_code },
+        ts,
+    );
+
+    Ok(CommandOutput {
+        stdout_stderr: res.output_text(),
+        exit_code: res.exit_code,
+        timed_out: res.timed_out,
+        reconciled: Some(rec),
+    })
+}
+
+/// Saves the step manifest for changes found by a post-run reconciliation.
+/// Shared by guarded commands and managed processes. Writes nothing when no path changed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_reconciled_changes(
+    root: &Path,
+    session_id: &str,
+    step_id: usize,
+    snap_before: &GuardSetSnapshot,
+    rec: &ReconcileResult,
+    ts: u64,
+    tool_log: &mut ToolLog,
+    recovery_path: &Path,
+) -> Result<(), ExecutionError> {
+    let has_mutations =
+        !rec.created.is_empty() || !rec.modified.is_empty() || !rec.deleted.is_empty();
     if has_mutations {
         let mut pre_state = Vec::new();
         let mut post_state = Vec::new();
@@ -142,7 +202,10 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
                 sha256: None,
                 blob_ref: None,
             });
-            post_state.push(record_path(root, p).map_err(ExecutionError::Manifest)?);
+            post_state.push(record_path(root, p).map_err(|e| ExecutionError::Recovery {
+                path: recovery_path.to_path_buf(),
+                reason: e.to_string(),
+            })?);
             tool_log.record_command_file_change(&p.to_string_lossy(), ts);
         }
 
@@ -157,7 +220,10 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
                 sha256: fp.and_then(|f| f.sha256.clone()),
                 blob_ref: fp.and_then(|f| f.sha256.clone()),
             });
-            post_state.push(record_path(root, p).map_err(ExecutionError::Manifest)?);
+            post_state.push(record_path(root, p).map_err(|e| ExecutionError::Recovery {
+                path: recovery_path.to_path_buf(),
+                reason: e.to_string(),
+            })?);
             tool_log.record_command_file_change(&p.to_string_lossy(), ts);
         }
 
@@ -191,17 +257,13 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
             pre_state,
             post_state: Some(post_state),
         };
-        save_manifest(root, &manifest).map_err(ExecutionError::Manifest)?;
+        save_manifest(root, &manifest).map_err(|e| ExecutionError::Recovery {
+            path: recovery_path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
     }
 
-    tool_log.record_command(cmd_str, res.exit_code, ts);
-
-    Ok(CommandOutput {
-        stdout_stderr: res.output_text(),
-        exit_code: res.exit_code,
-        timed_out: res.timed_out,
-        reconciled: Some(rec),
-    })
+    Ok(())
 }
 
 /// Applies a file edit guarded by boundary checks, unified diff approval,
