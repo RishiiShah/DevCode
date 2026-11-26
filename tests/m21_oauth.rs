@@ -1,11 +1,14 @@
-use devcode::auth::{login_gemini, Pkce, OAUTH_FILE};
+use devcode::auth::{
+    login_gemini, save_oauth, valid_gemini_oauth, LoopbackServer, Pkce, StoredOAuth, OAUTH_FILE,
+};
 use devcode::credentials::{load, save};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 fn scripted_server(responses: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<Vec<u8>>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -159,4 +162,82 @@ fn oauth_rejects_non_gemini() {
     );
     assert!(!dir.join("credentials.json").exists());
     assert!(!dir.join(OAUTH_FILE).exists());
+}
+
+#[test]
+fn expired_oauth_refreshes_automatically_and_preserves_refresh_token() {
+    std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
+    let dir = tempfile::tempdir().unwrap();
+    save_oauth(
+        dir.path(),
+        &StoredOAuth {
+            access_token: "expired-access".into(),
+            refresh_token: Some("keep-refresh".into()),
+            expires_at: Some(1),
+            project_id: Some("proj-123".into()),
+        },
+    )
+    .unwrap();
+    let (url, requests) = scripted_server(vec![(
+        200,
+        r#"{"access_token":"fresh-access","expires_in":3600}"#.into(),
+    )]);
+    let refreshed = valid_gemini_oauth(dir.path(), &url).unwrap().unwrap();
+    assert_eq!(refreshed.access_token, "fresh-access");
+    assert_eq!(refreshed.refresh_token.as_deref(), Some("keep-refresh"));
+    assert_eq!(refreshed.project_id.as_deref(), Some("proj-123"));
+    let captured = requests.lock().unwrap();
+    let form = String::from_utf8_lossy(&captured[0]);
+    assert!(form.contains("grant_type=refresh_token"), "{form}");
+    assert!(form.contains("refresh_token=keep-refresh"), "{form}");
+}
+
+#[test]
+fn loopback_server_receives_code_and_rejects_bad_state() {
+    let server = LoopbackServer::bind().unwrap();
+    let uri = server.redirect_uri.clone();
+    let addr = uri
+        .strip_prefix("http://")
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let handle =
+        thread::spawn(move || server.wait_for_code("expected-state", Duration::from_secs(5)));
+    let mut stream = TcpStream::connect(&addr).unwrap();
+    write!(
+        stream,
+        "GET /oauth2callback?code=cb-auth-code&state=expected-state HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    stream.flush().unwrap();
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    assert!(response.contains("200 OK"), "{response}");
+    assert_eq!(handle.join().unwrap().unwrap(), "cb-auth-code");
+
+    let server2 = LoopbackServer::bind().unwrap();
+    let addr2 = server2
+        .redirect_uri
+        .strip_prefix("http://")
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let handle2 =
+        thread::spawn(move || server2.wait_for_code("expected-state", Duration::from_secs(5)));
+    let mut stream2 = TcpStream::connect(&addr2).unwrap();
+    write!(
+        stream2,
+        "GET /oauth2callback?code=cb-auth-code&state=wrong-state HTTP/1.1\r\nHost: {addr2}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    stream2.flush().unwrap();
+    assert!(handle2
+        .join()
+        .unwrap()
+        .unwrap_err()
+        .contains("state mismatch"));
 }

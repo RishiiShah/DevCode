@@ -57,6 +57,7 @@ pub struct Session {
     model: Box<dyn agent::Model>,
     pub trace: bool,
     pub progress: Option<agent::ProgressSink>,
+    pub cancel: agent::CancelToken,
 }
 impl Session {
     pub fn new(
@@ -66,6 +67,7 @@ impl Session {
         model: Box<dyn agent::Model>,
         tools: agent::ToolRegistry,
     ) -> Self {
+        let cancel = tools.cancel_token().unwrap_or_default();
         Self {
             profile,
             config,
@@ -74,6 +76,7 @@ impl Session {
             model,
             trace: false,
             progress: None,
+            cancel,
         }
     }
     pub fn prompt(&self, prompt: &str) -> Result<agent::LoopResult, DevCodeError> {
@@ -82,6 +85,7 @@ impl Session {
             trace: self.trace,
             progress: self.progress.clone(),
             stream: stream_enabled(std::env::var("DEVCODE_STREAM").ok().as_deref()),
+            cancel: Some(self.cancel.clone()),
             ..Default::default()
         };
         agent::run_agent_with_config(
@@ -228,7 +232,7 @@ impl Session {
         })?;
         if !provider.supports_effort() {
             return Err(DevCodeError::Config(
-                "reasoning effort is only wired for the gemini provider so far".into(),
+                "reasoning effort is not supported for this provider".into(),
             ));
         }
         match level {
@@ -267,15 +271,23 @@ impl Session {
             .provider
             .as_ref()
             .and_then(|p| p.connector.as_deref());
-        let active = settings.active_slot.as_deref().or(connector);
-        Ok(credentials::account_lines(&entries, active))
+        let active_buf = connector
+            .map(|c| credentials::selected_key(settings.active_slot.as_deref(), c).to_owned());
+        let active = active_buf.as_deref().or(settings.active_slot.as_deref());
+        let has_oauth = auth::has_oauth_gemini(&dir);
+        Ok(credentials::account_lines_with_oauth(
+            &entries, active, has_oauth,
+        ))
     }
-    /// True when a non-empty stored key is selected for `connector` (env not considered).
+    /// True when a non-empty stored key or OAuth grant is available for `connector`.
     pub fn has_stored_key(&self, connector: &str) -> bool {
-        credentials::config_dir()
-            .ok()
-            .and_then(|dir| credentials::stored_key(&dir, connector).ok().flatten())
-            .is_some()
+        credentials::config_dir().ok().is_some_and(|dir| {
+            credentials::stored_key(&dir, connector)
+                .ok()
+                .flatten()
+                .is_some()
+                || (connector == "gemini" && auth::has_oauth_gemini(&dir))
+        })
     }
     pub fn connect(&mut self, name: Option<&str>) -> Result<(), DevCodeError> {
         use std::io::IsTerminal;
@@ -476,10 +488,14 @@ fn auth(
                 .and_then(|c| c.provider)
                 .and_then(|p| p.connector);
             let active = settings.active_slot.as_deref().or(configured.as_deref());
-            Ok(credentials::account_lines(&entries, active))
+            let has_oauth = auth::has_oauth_gemini(&absolute);
+            Ok(credentials::account_lines_with_oauth(
+                &entries, active, has_oauth,
+            ))
         }
         cli::AuthCommand::Switch { name } => {
-            if !entries.contains_key(name) {
+            let has_oauth = name == auth::OAUTH_SLOT && auth::has_oauth_gemini(&absolute);
+            if !entries.contains_key(name) && !has_oauth {
                 return Err(DevCodeError::Config(format!(
                     "no stored credential for {name}"
                 )));
@@ -492,6 +508,10 @@ fn auth(
             let removed = entries.remove(name).is_some();
             if removed {
                 credentials::save(&absolute, &entries)
+                    .map_err(|e| DevCodeError::Config(e.to_string()))?;
+            }
+            if name == auth::OAUTH_SLOT {
+                auth::delete_oauth_gemini(&absolute)
                     .map_err(|e| DevCodeError::Config(e.to_string()))?;
             }
             let settings = crate::settings::load_user_settings(&absolute)
@@ -524,46 +544,70 @@ fn auth(
             if *oauth && name == "gemini" {
                 let pkce =
                     auth::generate_pkce().map_err(|e| DevCodeError::Config(e.to_string()))?;
-                eprintln!(
-                    "Visit this URL, then paste the authorization code:\n{}",
-                    auth::authorize_url(&pkce)
-                );
                 let stdin = std::io::stdin();
-                let code = if *with_stdin {
-                    let mut code = String::new();
-                    stdin
-                        .lock()
-                        .read_line(&mut code)
+                let no_browser =
+                    *with_stdin || !std::env::var("NO_BROWSER").unwrap_or_default().is_empty();
+                if !no_browser && stdin.is_terminal() {
+                    let server = auth::LoopbackServer::bind()
                         .map_err(|e| DevCodeError::Config(e.to_string()))?;
-                    code.trim().to_string()
-                } else if stdin.is_terminal() {
-                    use std::os::fd::AsRawFd;
-                    // SAFETY: stdin fd; TCIFLUSH drops typed-ahead bytes before the paste prompt.
-                    if unsafe { libc::tcflush(stdin.as_raw_fd(), libc::TCIFLUSH) } != 0 {
+                    let redirect_uri = server.redirect_uri.clone();
+                    let url = auth::authorize_url_with_redirect(&pkce, &redirect_uri);
+                    eprintln!(
+                        "Opening browser for Google login. If it does not open, visit:\n{url}"
+                    );
+                    auth::open_browser(&url);
+                    let code = server
+                        .wait_for_code(&pkce.state, std::time::Duration::from_secs(300))
+                        .map_err(DevCodeError::Config)?;
+                    auth::login_gemini_with_redirect(
+                        &absolute,
+                        &code,
+                        auth::DEFAULT_TOKEN_URL,
+                        &pkce,
+                        &redirect_uri,
+                    )
+                    .map_err(DevCodeError::Config)?;
+                } else {
+                    eprintln!(
+                        "Visit this URL, then paste the authorization code:\n{}",
+                        auth::authorize_url(&pkce)
+                    );
+                    let code = if *with_stdin {
+                        let mut code = String::new();
+                        stdin
+                            .lock()
+                            .read_line(&mut code)
+                            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+                        code.trim().to_string()
+                    } else if stdin.is_terminal() {
+                        use std::os::fd::AsRawFd;
+                        // SAFETY: stdin fd; TCIFLUSH drops typed-ahead bytes before the paste prompt.
+                        if unsafe { libc::tcflush(stdin.as_raw_fd(), libc::TCIFLUSH) } != 0 {
+                            return Err(DevCodeError::Config(
+                                std::io::Error::last_os_error().to_string(),
+                            ));
+                        }
+                        let mut code = String::new();
+                        stdin
+                            .lock()
+                            .read_line(&mut code)
+                            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+                        code.trim().to_string()
+                    } else {
                         return Err(DevCodeError::Config(
-                            std::io::Error::last_os_error().to_string(),
+                            "use --with-stdin when no TTY is available".into(),
+                        ));
+                    };
+                    if code.is_empty() {
+                        return Err(DevCodeError::Config(
+                            "authorization code cannot be empty".into(),
                         ));
                     }
-                    let mut code = String::new();
-                    stdin
-                        .lock()
-                        .read_line(&mut code)
-                        .map_err(|e| DevCodeError::Config(e.to_string()))?;
-                    code.trim().to_string()
-                } else {
-                    return Err(DevCodeError::Config(
-                        "use --with-stdin when no TTY is available".into(),
-                    ));
-                };
-                if code.is_empty() {
-                    return Err(DevCodeError::Config(
-                        "authorization code cannot be empty".into(),
-                    ));
+                    auth::login_gemini(&absolute, &code, auth::DEFAULT_TOKEN_URL, &pkce)
+                        .map_err(DevCodeError::Config)?;
                 }
-                auth::login_gemini(&absolute, &code, auth::DEFAULT_TOKEN_URL, &pkce)
-                    .map_err(DevCodeError::Config)?;
                 return Ok(vec![
-                    "saved google tokens to oauth-gemini.json (API key in credentials.json untouched; not used by openai_compat yet)".into(),
+                    "saved google oauth tokens to oauth-gemini.json (active for gemini when no API key is set, or via `devcode auth switch gemini:oauth`)".into(),
                 ]);
             }
             let stdin = std::io::stdin();
@@ -604,7 +648,42 @@ fn build_model(provider: config::ProviderConfig) -> Result<Box<dyn agent::Model>
             "provider.model is missing from configuration".into(),
         ));
     }
+    let is_gemini = provider.connector.as_deref() == Some("gemini")
+        || provider
+            .base_url
+            .contains("generativelanguage.googleapis.com")
+        || provider.base_url.contains("cloudcode-pa.googleapis.com");
     let model: Box<dyn agent::Model> = match provider.kind {
+        config::ProviderKind::OpenaiCompat if is_gemini => {
+            let oauth_selected = credentials::config_dir()
+                .ok()
+                .and_then(|dir| crate::settings::load_user_settings(&dir).ok())
+                .and_then(|s| s.active_slot)
+                .is_some_and(|slot| slot == auth::OAUTH_SLOT);
+            if oauth_selected {
+                Box::new(
+                    agent::code_assist::CodeAssist::new(provider.clone())
+                        .map_err(|e| DevCodeError::Config(e.to_string()))?,
+                )
+            } else {
+                match agent::openai_compat::OpenAiCompat::new(provider.clone()) {
+                    Ok(m) => Box::new(m),
+                    Err(compat_err) => {
+                        let has_oauth = credentials::config_dir()
+                            .ok()
+                            .is_some_and(|dir| auth::has_oauth_gemini(&dir));
+                        if has_oauth {
+                            Box::new(
+                                agent::code_assist::CodeAssist::new(provider.clone())
+                                    .map_err(|e| DevCodeError::Config(e.to_string()))?,
+                            )
+                        } else {
+                            return Err(DevCodeError::Config(compat_err.to_string()));
+                        }
+                    }
+                }
+            }
+        }
         config::ProviderKind::OpenaiCompat => Box::new(
             agent::openai_compat::OpenAiCompat::new(provider.clone())
                 .map_err(|e| DevCodeError::Config(e.to_string()))?,

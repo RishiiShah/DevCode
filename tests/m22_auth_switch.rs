@@ -454,3 +454,61 @@ fn env_still_beats_stored_when_nothing_was_switched() {
     assert!(!headers.contains(WORK));
     assert!(!headers.contains(PLAIN));
 }
+
+#[test]
+fn connections_marks_current_provider_not_stale_other_provider_slot() {
+    let _guard = env_lock();
+    std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
+    let root = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let dir = storage.path().join("config");
+    std::env::set_var("DEVCODE_CONFIG_DIR", &dir);
+
+    let mut entries = BTreeMap::new();
+    entries.insert("nim".into(), PLAIN.into());
+    entries.insert("nim:work".into(), WORK.into());
+    entries.insert("gemini".into(), "fake-gemini-m22".into());
+    credentials::save(&dir, &entries).unwrap();
+
+    devcode::save_user_settings(
+        &dir,
+        &UserSettings {
+            active_slot: Some("nim:work".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let mut session = Session::new(
+        root.path().to_path_buf(),
+        Config {
+            provider: Some(provider("http://127.0.0.1:9")),
+            ..Default::default()
+        },
+        Profile::Ask,
+        Box::new(devcode::agent::ScriptedModel::new(vec![])),
+        devcode::agent::ToolRegistry::new(),
+    );
+    let nim_lines = session.connections().unwrap();
+    assert!(
+        nim_lines
+            .iter()
+            .any(|l| l.starts_with("nim:work ") && l.contains('*')),
+        "{nim_lines:?}"
+    );
+
+    session.set_provider("gemini").unwrap();
+    let gemini_lines = session.connections().unwrap();
+    assert!(
+        gemini_lines
+            .iter()
+            .any(|l| l.starts_with("gemini ") && l.contains('*')),
+        "{gemini_lines:?}"
+    );
+    assert!(
+        !gemini_lines
+            .iter()
+            .any(|l| l.starts_with("nim:work ") && l.contains('*')),
+        "{gemini_lines:?}"
+    );
+}

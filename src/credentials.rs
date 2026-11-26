@@ -109,6 +109,128 @@ pub fn save(dir: &Path, entries: &BTreeMap<String, String>) -> io::Result<()> {
     save_from(dir, entries, store_mode()?, &OsKeyring)
 }
 
+/// Loads an auxiliary secret blob (e.g. OAuth tokens) respecting `DEVCODE_CREDENTIALS_STORE`.
+pub(crate) fn load_aux_secret(
+    dir: &Path,
+    keyring_account: &str,
+    filename: &str,
+) -> io::Result<Option<String>> {
+    if matches!(store_mode()?, StoreMode::Auto) {
+        let entry = match keyring::Entry::new(KEYRING_SERVICE, keyring_account) {
+            Ok(e) => match e.get_password() {
+                Ok(secret) => Get::Found(secret),
+                Err(err) => get_from_classified(classify(err))?,
+            },
+            Err(err) => get_from_classified(classify(err))?,
+        };
+        if let Get::Found(raw) = entry {
+            return Ok(Some(raw));
+        }
+    }
+    let path = dir.join(filename);
+    let mut opts = OpenOptions::new();
+    opts.read(true).custom_flags(libc::O_NOFOLLOW);
+    let mut file = match opts.open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if file.metadata()?.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "credentials file permissions are too open; run chmod 600 {}",
+                path.display()
+            ),
+        ));
+    }
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut file, &mut buf)?;
+    Ok(Some(buf))
+}
+
+/// Saves an auxiliary secret blob atomically with 0600 permissions (or OS keyring in `auto` mode).
+pub(crate) fn save_aux_secret(
+    dir: &Path,
+    keyring_account: &str,
+    filename: &str,
+    payload: &str,
+) -> io::Result<()> {
+    if matches!(store_mode()?, StoreMode::Auto) {
+        let res = keyring::Entry::new(KEYRING_SERVICE, keyring_account)
+            .map_err(set_error)
+            .and_then(|e| e.set_password(payload).map_err(set_error));
+        match res {
+            Ok(()) => {
+                match fs::remove_file(dir.join(filename)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+                return Ok(());
+            }
+            Err(err) if is_keyring_unavailable(&err) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = dir.join(format!(".{filename}-{}-{nonce}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
+        file.write_all(payload.as_bytes())?;
+        if !payload.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+        fs::rename(&temp, dir.join(filename))?;
+        fs::File::open(dir)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Removes an auxiliary secret from the OS keyring (in `auto` mode) and from the fallback file.
+/// An unreachable keyring is skipped: `load_aux_secret` could not read from it either.
+pub(crate) fn delete_aux_secret(
+    dir: &Path,
+    keyring_account: &str,
+    filename: &str,
+) -> io::Result<()> {
+    if matches!(store_mode()?, StoreMode::Auto) {
+        let res = keyring::Entry::new(KEYRING_SERVICE, keyring_account)
+            .and_then(|entry| entry.delete_credential());
+        if let Err(err) = res {
+            match classify(err) {
+                Classified::Missing | Classified::Unavailable(_) => {}
+                Classified::Hard(err) => return Err(err),
+            }
+        }
+    }
+    match fs::remove_file(dir.join(filename)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+pub(crate) fn has_aux_secret(dir: &Path, keyring_account: &str, filename: &str) -> bool {
+    load_aux_secret(dir, keyring_account, filename)
+        .ok()
+        .flatten()
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
 fn load_file(dir: &Path) -> io::Result<BTreeMap<String, String>> {
     let path = dir.join("credentials.json");
     let mut opts = OpenOptions::new();
@@ -352,6 +474,14 @@ pub fn stored_key(dir: &Path, connector: &str) -> io::Result<Option<String>> {
 /// Never includes key material. The selected credential is marked with ` *`.
 /// Named slots (`nim:work`) are `stored`, not custom.
 pub fn account_lines(entries: &BTreeMap<String, String>, active: Option<&str>) -> Vec<String> {
+    account_lines_with_oauth(entries, active, false)
+}
+
+pub fn account_lines_with_oauth(
+    entries: &BTreeMap<String, String>,
+    active: Option<&str>,
+    gemini_oauth: bool,
+) -> Vec<String> {
     let mut lines = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for preset in &crate::config::PRESETS {
@@ -373,6 +503,14 @@ pub fn account_lines(entries: &BTreeMap<String, String>, active: Option<&str>) -
             ""
         };
         lines.push(format!("{}  {}{}", preset.name, source, mark));
+    }
+    if gemini_oauth && !entries.contains_key(crate::auth::OAUTH_SLOT) {
+        let mark = if active == Some(crate::auth::OAUTH_SLOT) {
+            " *"
+        } else {
+            ""
+        };
+        lines.push(format!("{}  stored (oauth){mark}", crate::auth::OAUTH_SLOT));
     }
     for name in entries.keys() {
         if seen.contains(name.as_str()) {

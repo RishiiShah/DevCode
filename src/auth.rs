@@ -1,10 +1,9 @@
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const CLIENT_ID: &str =
@@ -14,6 +13,8 @@ pub const REDIRECT_URI: &str = "https://codeassist.google.com/authcode";
 pub const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const DEFAULT_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 pub const OAUTH_FILE: &str = "oauth-gemini.json";
+pub const OAUTH_KEYRING_ACCOUNT: &str = "oauth-gemini";
+pub const OAUTH_SLOT: &str = "gemini:oauth";
 
 const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
@@ -34,13 +35,15 @@ pub struct GoogleTokens {
     pub expires_in: Option<u64>,
 }
 
-#[derive(Serialize)]
-struct StoredOAuth {
-    access_token: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    refresh_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires_at: Option<u64>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredOAuth {
+    pub access_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 fn base64url_nopad(bytes: &[u8]) -> String {
@@ -115,11 +118,15 @@ pub fn generate_pkce() -> io::Result<Pkce> {
 }
 
 pub fn authorize_url(pkce: &Pkce) -> String {
+    authorize_url_with_redirect(pkce, REDIRECT_URI)
+}
+
+pub fn authorize_url_with_redirect(pkce: &Pkce, redirect_uri: &str) -> String {
     let scope = SCOPES.join(" ");
     let fields = [
         ("response_type", "code"),
         ("client_id", CLIENT_ID),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
         ("scope", scope.as_str()),
         ("code_challenge", pkce.challenge.as_str()),
         ("code_challenge_method", "S256"),
@@ -139,14 +146,39 @@ pub fn authorize_url(pkce: &Pkce) -> String {
 }
 
 pub fn exchange_code(token_url: &str, code: &str, pkce: &Pkce) -> Result<GoogleTokens, String> {
+    exchange_code_with_redirect(token_url, code, pkce, REDIRECT_URI)
+}
+
+pub fn exchange_code_with_redirect(
+    token_url: &str,
+    code: &str,
+    pkce: &Pkce,
+    redirect_uri: &str,
+) -> Result<GoogleTokens, String> {
     let response = ureq::post(token_url).send_form(&[
         ("grant_type", "authorization_code"),
         ("code", code),
         ("code_verifier", pkce.verifier.as_str()),
         ("client_id", CLIENT_ID),
         ("client_secret", CLIENT_SECRET),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
     ]);
+    parse_token_response(response)
+}
+
+pub fn refresh_access_token(token_url: &str, refresh_token: &str) -> Result<GoogleTokens, String> {
+    let response = ureq::post(token_url).send_form(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", CLIENT_ID),
+        ("client_secret", CLIENT_SECRET),
+    ]);
+    parse_token_response(response)
+}
+
+fn parse_token_response(
+    response: Result<ureq::Response, ureq::Error>,
+) -> Result<GoogleTokens, String> {
     let response = match response {
         Ok(response) => response,
         Err(ureq::Error::Status(code, response)) => return Err(http_error(code, response)),
@@ -201,42 +233,269 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn save_oauth_file(dir: &Path, tokens: &GoogleTokens) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    let stored = StoredOAuth {
+pub fn load_oauth(dir: &Path) -> io::Result<Option<StoredOAuth>> {
+    let Some(raw) = crate::credentials::load_aux_secret(dir, OAUTH_KEYRING_ACCOUNT, OAUTH_FILE)?
+    else {
+        return Ok(None);
+    };
+    let parsed = serde_json::from_str(&raw)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid oauth-gemini.json"))?;
+    Ok(Some(parsed))
+}
+
+/// Removes stored Gemini OAuth tokens from every store they may live in.
+pub fn delete_oauth_gemini(dir: &Path) -> io::Result<()> {
+    crate::credentials::delete_aux_secret(dir, OAUTH_KEYRING_ACCOUNT, OAUTH_FILE)
+}
+
+pub fn has_oauth_gemini(dir: &Path) -> bool {
+    crate::credentials::has_aux_secret(dir, OAUTH_KEYRING_ACCOUNT, OAUTH_FILE)
+}
+
+pub fn save_oauth(dir: &Path, stored: &StoredOAuth) -> io::Result<()> {
+    let payload = serde_json::to_string(stored).map_err(io::Error::other)?;
+    crate::credentials::save_aux_secret(dir, OAUTH_KEYRING_ACCOUNT, OAUTH_FILE, &payload)
+}
+
+fn to_stored(tokens: &GoogleTokens, project_id: Option<String>) -> StoredOAuth {
+    StoredOAuth {
         access_token: tokens.access_token.clone(),
         refresh_token: tokens.refresh_token.clone(),
         expires_at: tokens
             .expires_in
             .map(|secs| now_secs().saturating_add(secs)),
-    };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp = dir.join(format!(".oauth-gemini-{}-{nonce}.tmp", std::process::id()));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)?;
-        serde_json::to_writer(&mut file, &stored).map_err(io::Error::other)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        fs::rename(&temp, dir.join(OAUTH_FILE))?;
-        fs::File::open(dir)?.sync_all()
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        project_id,
     }
-    result
+}
+
+/// Returns a non-expired Gemini OAuth grant, refreshing via `refresh_token` if expired/near-expiry.
+pub fn valid_gemini_oauth(dir: &Path, token_url: &str) -> Result<Option<StoredOAuth>, String> {
+    let Some(stored) = load_oauth(dir).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let still_valid = stored
+        .expires_at
+        .is_none_or(|exp| now_secs().saturating_add(60) < exp);
+    if still_valid {
+        return Ok(Some(stored));
+    }
+    force_refresh_gemini_oauth(dir, token_url, &stored).map(Some)
+}
+
+/// Refreshes the stored Gemini OAuth grant unconditionally using its `refresh_token`.
+pub fn force_refresh_gemini_oauth(
+    dir: &Path,
+    token_url: &str,
+    stored: &StoredOAuth,
+) -> Result<StoredOAuth, String> {
+    let refresh = stored.refresh_token.as_deref().ok_or_else(|| {
+        "Gemini OAuth token expired; run `devcode auth login gemini --oauth`".to_string()
+    })?;
+    let tokens = refresh_access_token(token_url, refresh)?;
+    let updated = StoredOAuth {
+        access_token: tokens.access_token,
+        refresh_token: tokens
+            .refresh_token
+            .or_else(|| stored.refresh_token.clone()),
+        expires_at: tokens
+            .expires_in
+            .map(|secs| now_secs().saturating_add(secs)),
+        project_id: stored.project_id.clone(),
+    };
+    save_oauth(dir, &updated).map_err(|e| e.to_string())?;
+    Ok(updated)
+}
+
+pub fn update_gemini_project_id(dir: &Path, project_id: &str) -> Result<(), String> {
+    let Some(mut stored) = load_oauth(dir).map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
+    stored.project_id = Some(project_id.to_owned());
+    save_oauth(dir, &stored).map_err(|e| e.to_string())
 }
 
 /// Exchange a paste-code and write `oauth-gemini.json`. Never touches `credentials.json`.
 pub fn login_gemini(dir: &Path, code: &str, token_url: &str, pkce: &Pkce) -> Result<(), String> {
-    let tokens = exchange_code(token_url, code, pkce)?;
-    save_oauth_file(dir, &tokens).map_err(|e| e.to_string())?;
+    login_gemini_with_redirect(dir, code, token_url, pkce, REDIRECT_URI)
+}
+
+pub fn login_gemini_with_redirect(
+    dir: &Path,
+    code: &str,
+    token_url: &str,
+    pkce: &Pkce,
+    redirect_uri: &str,
+) -> Result<(), String> {
+    let tokens = exchange_code_with_redirect(token_url, code, pkce, redirect_uri)?;
+    let existing_project = load_oauth(dir).ok().flatten().and_then(|s| s.project_id);
+    save_oauth(dir, &to_stored(&tokens, existing_project)).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Short-lived localhost callback listener for browser OAuth redirects.
+pub struct LoopbackServer {
+    listener: TcpListener,
+    pub redirect_uri: String,
+}
+
+impl LoopbackServer {
+    pub fn bind() -> io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        listener.set_nonblocking(true)?;
+        Ok(Self {
+            listener,
+            redirect_uri: format!("http://127.0.0.1:{port}/oauth2callback"),
+        })
+    }
+
+    pub fn wait_for_code(self, expected_state: &str, timeout: Duration) -> Result<String, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Some(result) = handle_callback_connection(&mut stream, expected_state) {
+                        return result;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err("OAuth callback timed out".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(e) => return Err(format!("OAuth callback listener error: {e}")),
+            }
+        }
+    }
+}
+
+fn handle_callback_connection(
+    stream: &mut std::net::TcpStream,
+    expected_state: &str,
+) -> Option<Result<String, String>> {
+    let mut reader = BufReader::new(&*stream);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).ok()? == 0 {
+        return None;
+    }
+    let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+    if !path.starts_with("/oauth2callback") {
+        let _ = write_http_html(
+            stream,
+            "404 Not Found",
+            "<html><body>Not found</body></html>",
+        );
+        return None;
+    }
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let params = parse_query(query);
+    if let Some(err) = params.get("error") {
+        let desc = params
+            .get("error_description")
+            .map(String::as_str)
+            .unwrap_or("");
+        let _ = write_http_html(
+            stream,
+            "400 Bad Request",
+            "<html><body>Authentication failed. You may close this tab.</body></html>",
+        );
+        return Some(Err(if desc.is_empty() {
+            format!("Google OAuth error: {err}")
+        } else {
+            format!("Google OAuth error: {err} ({desc})")
+        }));
+    }
+    if params.get("state").map(String::as_str) != Some(expected_state) {
+        let _ = write_http_html(
+            stream,
+            "400 Bad Request",
+            "<html><body>State mismatch. You may close this tab.</body></html>",
+        );
+        return Some(Err("OAuth state mismatch".into()));
+    }
+    let Some(code) = params.get("code").filter(|c| !c.is_empty()) else {
+        let _ = write_http_html(
+            stream,
+            "400 Bad Request",
+            "<html><body>Missing authorization code.</body></html>",
+        );
+        return Some(Err("missing authorization code in callback".into()));
+    };
+    let _ = write_http_html(
+        stream,
+        "200 OK",
+        "<html><body>Authentication succeeded. You may close this tab and return to DevCode.</body></html>",
+    );
+    Some(Ok(code.clone()))
+}
+
+fn write_http_html(stream: &mut std::net::TcpStream, status: &str, body: &str) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()
+}
+
+fn parse_query(query: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        map.insert(urldecode(k), urldecode(v));
+    }
+    map
+}
+
+fn urldecode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+pub fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(not(target_os = "macos"))]
+    let cmd = "xdg-open";
+    let _ = std::process::Command::new(cmd)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
