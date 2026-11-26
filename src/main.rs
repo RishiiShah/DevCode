@@ -181,31 +181,36 @@ fn main() {
             );
         }
         Ok(RunOutput::Prompt(result)) => print_result(&result),
-        Ok(RunOutput::Repl(mut session)) => loop {
-            let mut line = String::new();
-            match io::stdin().read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) if line.trim() == "/exit" => break,
-                Ok(_) => {
-                    if devcode::handle_slash_command(&line, &mut session.profile)
-                        || line.trim().is_empty()
-                    {
-                        continue;
+        Ok(RunOutput::Repl(mut session)) => {
+            if let Some(notice) = session.legacy_state_notice() {
+                println!("{notice}");
+            }
+            loop {
+                let mut line = String::new();
+                match io::stdin().read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) if line.trim() == "/exit" => break,
+                    Ok(_) => {
+                        if devcode::handle_slash_command(&line, &mut session.profile)
+                            || line.trim().is_empty()
+                        {
+                            continue;
+                        }
+                        if handle_plain_slash(&line, &mut session) {
+                            continue;
+                        }
+                        match session.prompt(&line) {
+                            Ok(result) => print_result(&result),
+                            Err(e) => eprintln!("{}", e),
+                        }
                     }
-                    if handle_plain_slash(&line, &mut session) {
-                        continue;
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        break;
                     }
-                    match session.prompt(&line) {
-                        Ok(result) => print_result(&result),
-                        Err(e) => eprintln!("{}", e),
-                    }
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                    break;
                 }
             }
-        },
+        }
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);

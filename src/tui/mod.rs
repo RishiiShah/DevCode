@@ -48,6 +48,9 @@ pub fn run(cli: Cli) -> Result<(), DevCodeError> {
     let startup_note = session.startup_note();
     let prefetch = session.has_provider() && startup_note.is_none();
     let mut app = App::new(session.profile, session.provider_label(), startup_note);
+    if let Some(notice) = session.legacy_state_notice() {
+        app.on_event(Ev::Info(vec![notice]));
+    }
     app.context_window = session.context_window();
     app.context_source = session.context_window_source();
     if let Some(items) = session.statusline() {

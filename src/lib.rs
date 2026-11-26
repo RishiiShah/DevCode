@@ -218,6 +218,10 @@ impl Session {
     pub fn has_provider(&self) -> bool {
         self.config.provider.is_some()
     }
+    /// Notice when a legacy `<root>/.devcode/` directory exists while state lives elsewhere.
+    pub fn legacy_state_notice(&self) -> Option<String> {
+        state::legacy_workspace_state_notice(&self.root)
+    }
     /// First-run note when a provider is configured but no API key is available.
     pub fn startup_note(&self) -> Option<String> {
         let provider = self.config.provider.as_ref()?;

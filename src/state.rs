@@ -67,6 +67,26 @@ pub fn recovery_dir(root: &Path) -> PathBuf {
     dir(root).join("recovery")
 }
 
+/// Returns an informational notice when `<root>/.devcode/` exists in the workspace while
+/// active harness state lives elsewhere, naming it as safe to delete. Never deletes it.
+pub fn legacy_workspace_state_notice(root: &Path) -> Option<String> {
+    let legacy = root.join(".devcode");
+    if !legacy.is_dir() {
+        return None;
+    }
+    let current = dir(root);
+    let same = current == legacy
+        || (current.canonicalize().ok().is_some()
+            && current.canonicalize().ok() == legacy.canonicalize().ok());
+    if same {
+        return None;
+    }
+    Some(format!(
+        "Legacy .devcode/ directory found in workspace; harness state now lives at {} so .devcode/ is safe to delete.",
+        current.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -81,5 +101,21 @@ mod tests {
         );
         assert_ne!(da, db);
         assert_eq!(da, super::dir(a.path()), "stable for one project");
+    }
+
+    #[test]
+    fn legacy_workspace_state_notice_reports_without_deleting() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(super::legacy_workspace_state_notice(root.path()).is_none());
+
+        let legacy = root.path().join(".devcode");
+        std::fs::create_dir_all(legacy.join("blobs")).unwrap();
+        std::fs::write(legacy.join("blobs").join("keep"), b"data").unwrap();
+
+        let notice = super::legacy_workspace_state_notice(root.path())
+            .expect("should report legacy .devcode/ when state dir is elsewhere");
+        assert!(notice.contains(".devcode/"));
+        assert!(notice.contains("safe to delete"));
+        assert!(legacy.join("blobs").join("keep").exists(), "never delete");
     }
 }
