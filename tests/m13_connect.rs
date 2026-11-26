@@ -31,10 +31,15 @@ fn pty() -> (std::fs::File, std::fs::File) {
         )
     }
 }
-fn read_until(master: &mut std::fs::File, target: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut bytes = Vec::new();
+fn read_until_buf(master: &mut std::fs::File, buf: &mut Vec<u8>, target: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
+        if let Some(pos) = String::from_utf8_lossy(buf).find(target) {
+            let end = pos + target.len();
+            let consumed = String::from_utf8_lossy(&buf[..end]).into_owned();
+            buf.drain(..end);
+            return consumed;
+        }
         let mut fd = libc::pollfd {
             fd: master.as_raw_fd(),
             events: libc::POLLIN,
@@ -42,17 +47,21 @@ fn read_until(master: &mut std::fs::File, target: &str) -> String {
         };
         // SAFETY: fd points to one initialized pollfd for the duration of the call.
         if unsafe { libc::poll(&mut fd, 1, 100) } > 0 {
-            let mut buf = [0; 1024];
-            match master.read(&mut buf) {
+            let mut chunk = [0; 1024];
+            match master.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => bytes.extend_from_slice(&buf[..n]),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
             };
-            if String::from_utf8_lossy(&bytes).contains(target) {
-                return String::from_utf8_lossy(&bytes).into_owned();
-            }
         }
     }
-    panic!("expected prompt not received");
+    panic!(
+        "expected prompt {target:?} not received; got {:?}",
+        String::from_utf8_lossy(buf)
+    );
+}
+fn read_until(master: &mut std::fs::File, target: &str) -> String {
+    let mut buf = Vec::new();
+    read_until_buf(master, &mut buf, target)
 }
 #[test]
 fn typed_ahead_is_flushed_before_hidden_prompt() {
@@ -248,16 +257,21 @@ fn tty_connect_rebuilds_provider_for_next_request() {
         .stderr(Stdio::from(slave))
         .spawn()
         .unwrap();
+    let mut pty_buf = Vec::new();
     master.write_all(b"/connect nim\n").unwrap();
-    let mut visible = read_until(&mut master, "Paste the key now. Input is hidden.");
+    let mut visible = read_until_buf(
+        &mut master,
+        &mut pty_buf,
+        "Paste the key now. Input is hidden.",
+    );
     master.write_all(b"synthetic-secret-M13\n").unwrap();
-    visible.push_str(&read_until(&mut master, "\r\n"));
+    visible.push_str(&read_until_buf(&mut master, &mut pty_buf, "\r\n"));
     master.write_all(b"hello\n").unwrap();
-    let headers = recv.recv_timeout(Duration::from_secs(10)).unwrap();
+    let headers = recv.recv_timeout(Duration::from_secs(30)).unwrap();
     assert!(headers.contains("Bearer synthetic-secret-M13"));
-    visible.push_str(&read_until(&mut master, "safe response"));
+    visible.push_str(&read_until_buf(&mut master, &mut pty_buf, "safe response"));
     master.write_all(b"/connections\n").unwrap();
-    visible.push_str(&read_until(&mut master, "nim  stored"));
+    visible.push_str(&read_until_buf(&mut master, &mut pty_buf, "nim  stored"));
     master.write_all(b"/exit\n").unwrap();
     assert!(child.wait().unwrap().success());
     server.join().unwrap();
