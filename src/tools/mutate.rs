@@ -1,5 +1,6 @@
-use crate::agent::{Tool, ToolRegistry};
-use crate::approval::{execute_guarded_command, ApprovalPrompt};
+use crate::agent::{CancelToken, Tool, ToolRegistry};
+use crate::approval::runner::execute_guarded_command_cancellable;
+use crate::approval::ApprovalPrompt;
 use crate::discipline::{
     apply_disciplined_file_edit, DeclareScopeTool, ScopeContract, TaskSummary,
 };
@@ -20,6 +21,7 @@ pub struct MutationContext {
     pub(crate) processes: super::managed::ManagedProcesses,
     scope: ScopeContract,
     pub(crate) approval_wait: Arc<Mutex<Duration>>,
+    pub(crate) cancel: CancelToken,
 }
 
 impl MutationContext {
@@ -47,6 +49,7 @@ impl MutationContext {
             processes: Default::default(),
             scope: ScopeContract::new(),
             approval_wait,
+            cancel: CancelToken::new(),
         }
     }
 }
@@ -75,6 +78,7 @@ pub fn registry(root: PathBuf, auto_approve_edits: bool) -> ToolRegistry {
 pub fn registry_with_context(context: MutationContext) -> ToolRegistry {
     let root = context.root.clone();
     let scope = context.scope.clone();
+    let cancel = context.cancel.clone();
     let shared = Arc::new(Mutex::new(context));
     let mut tools = ToolRegistry::new();
     tools.context = Some(Arc::clone(&shared));
@@ -86,6 +90,7 @@ pub fn registry_with_context(context: MutationContext) -> ToolRegistry {
         tools.register(MutationTool {
             kind,
             context: Arc::clone(&shared),
+            cancel: cancel.clone(),
         });
     }
     super::managed::register(&mut tools, Arc::clone(&shared));
@@ -101,6 +106,7 @@ enum Kind {
 struct MutationTool {
     kind: Kind,
     context: Arc<Mutex<MutationContext>>,
+    cancel: CancelToken,
 }
 #[derive(Deserialize)]
 struct WriteArgs {
@@ -162,9 +168,17 @@ impl Tool for MutationTool {
             Kind::Command => {
                 let args: CommandArgs = serde_json::from_str(arguments)
                     .map_err(|e| format!("invalid arguments: {e}"))?;
-                let result =
-                    execute_guarded_command(root, &args.command, session, *step, 120, prompt, log)
-                        .map_err(|e| e.to_string())?;
+                let result = execute_guarded_command_cancellable(
+                    root,
+                    &args.command,
+                    session,
+                    *step,
+                    120,
+                    prompt,
+                    log,
+                    Some(&self.cancel),
+                )
+                .map_err(|e| e.to_string())?;
                 let output = format!(
                     "{}\nexit code: {:?}; timed out: {}",
                     result.stdout_stderr, result.exit_code, result.timed_out

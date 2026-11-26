@@ -82,12 +82,20 @@ fn switching_provider_model_and_effort() {
     empty.set_provider("gemini").unwrap();
     assert!(empty.has_provider());
 
-    // Native Anthropic preset switches kind (P10a).
+    // Native Anthropic preset switches kind (P10a) and supports effort (P3).
     empty.set_provider("anthropic").unwrap();
     assert_eq!(
         empty.provider_label(),
         format!("anthropic · {}", preset("anthropic").unwrap().default_model)
     );
+    assert_eq!(empty.effort_levels(), ["low", "medium", "high"]);
+    let _ = empty.set_effort(Some("medium")).unwrap();
+    assert!(empty.provider_label().contains("effort medium"));
+
+    // OpenAI reasoning models also support effort (P3).
+    empty.set_provider("openai").unwrap();
+    empty.set_model("o3").unwrap();
+    assert_eq!(empty.effort_levels(), ["low", "medium", "high"]);
 
     // CLI --provider applies any preset, not only nim.
     let cli = devcode::Cli::parse_from(["devcode", "--provider", "gemini"]);

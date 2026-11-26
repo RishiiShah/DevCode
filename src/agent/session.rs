@@ -1,4 +1,5 @@
-use crate::agent::{Model, ModelError, Request, Response, ToolRegistry};
+use crate::agent::sse::sleep_cancellable;
+use crate::agent::{CancelToken, Model, ModelError, Request, Response, StreamChunk, ToolRegistry};
 use crate::gate::{ToolKind, ToolLog};
 use crate::manifest::record::{load_manifest, PathRecord, StepManifest};
 use std::collections::BTreeMap;
@@ -123,32 +124,58 @@ impl Model for RateLimitedModel {
         self.model.list_models()
     }
     fn complete(&self, request: &Request) -> Result<Response, ModelError> {
-        let mut last = self
-            .last
-            .lock()
-            .map_err(|e| ModelError::Other(e.to_string()))?;
-        if let Some(previous) = *last {
-            std::thread::sleep(self.interval.saturating_sub(previous.elapsed()));
-        }
-        *last = Some(Instant::now());
-        drop(last);
-        self.model.complete(request)
+        self.complete_cancellable(request, None)
+    }
+    fn complete_cancellable(
+        &self,
+        request: &Request,
+        cancel: Option<&CancelToken>,
+    ) -> Result<Response, ModelError> {
+        let wait = {
+            let mut last = self
+                .last
+                .lock()
+                .map_err(|e| ModelError::Other(e.to_string()))?;
+            let wait = last
+                .map(|previous| self.interval.saturating_sub(previous.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            *last = Some(Instant::now());
+            wait
+        };
+        sleep_cancellable(cancel, wait)?;
+        self.model.complete_cancellable(request, cancel)
     }
     fn complete_stream(
         &self,
         request: &Request,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<Response, ModelError> {
-        let mut last = self
-            .last
-            .lock()
-            .map_err(|e| ModelError::Other(e.to_string()))?;
-        if let Some(previous) = *last {
-            std::thread::sleep(self.interval.saturating_sub(previous.elapsed()));
-        }
-        *last = Some(Instant::now());
-        drop(last);
-        self.model.complete_stream(request, on_delta)
+        self.complete_stream_cancellable(request, None, &mut |chunk| {
+            if let StreamChunk::Text(piece) = chunk {
+                on_delta(piece);
+            }
+        })
+    }
+    fn complete_stream_cancellable(
+        &self,
+        request: &Request,
+        cancel: Option<&CancelToken>,
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
+    ) -> Result<Response, ModelError> {
+        let wait = {
+            let mut last = self
+                .last
+                .lock()
+                .map_err(|e| ModelError::Other(e.to_string()))?;
+            let wait = last
+                .map(|previous| self.interval.saturating_sub(previous.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            *last = Some(Instant::now());
+            wait
+        };
+        sleep_cancellable(cancel, wait)?;
+        self.model
+            .complete_stream_cancellable(request, cancel, on_chunk)
     }
 }
 

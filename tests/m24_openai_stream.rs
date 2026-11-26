@@ -456,3 +456,69 @@ fn empty_streamed_tool_arguments_become_empty_object() {
     assert_eq!(response.tool_calls.len(), 1);
     assert_eq!(response.tool_calls[0].arguments, "{}");
 }
+
+#[test]
+fn stream_emits_reasoning_chunks_and_redacts_keys() {
+    use devcode::agent::StreamChunk;
+    const KEY: &str = "sk-reason-secret";
+    std::env::set_var("M24_OPENAI_REASON_KEY", KEY);
+    let events = vec![
+        data_event(json!({"choices":[{"delta":{"reasoning_content":"think sk-reason-"}}]})),
+        data_event(json!({"choices":[{"delta":{"reasoning":"secret!"}}]})),
+        data_event(json!({"choices":[{"delta":{"content":"answer"}}]})),
+        done_event(),
+    ];
+    let (url, _) = serve(vec![Reply::Sse(events)]);
+    let mut cfg = config(url);
+    cfg.api_key_env = "M24_OPENAI_REASON_KEY".into();
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let response = OpenAiCompat::new(cfg)
+        .unwrap()
+        .complete_stream_cancellable(&request(), None, &mut |chunk| match chunk {
+            StreamChunk::Text(s) => text.push_str(s),
+            StreamChunk::Reasoning(s) => {
+                assert!(!s.contains(KEY), "key leaked in reasoning chunk {s:?}");
+                reasoning.push_str(s);
+            }
+        })
+        .unwrap();
+    std::env::remove_var("M24_OPENAI_REASON_KEY");
+    assert_eq!(text, "answer");
+    assert_eq!(response.text.as_deref(), Some("answer"));
+    assert_eq!(reasoning, "think [REDACTED]!");
+}
+
+#[test]
+fn cancel_aborts_stalled_stream_immediately() {
+    use devcode::agent::CancelToken;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_request(&mut stream);
+        sse_headers(&mut stream);
+        write_chunk(
+            &mut stream,
+            &data_event(json!({"choices":[{"delta":{"content":"partial"}}]})),
+        );
+        let _ = ready_tx.send(());
+        thread::sleep(Duration::from_secs(5));
+    });
+    let cancel = CancelToken::new();
+    let cancel_thread = cancel.clone();
+    thread::spawn(move || {
+        let _ = ready_rx.recv();
+        thread::sleep(Duration::from_millis(20));
+        cancel_thread.cancel();
+    });
+    let start = std::time::Instant::now();
+    let err = OpenAiCompat::new(config(format!("http://{address}")))
+        .unwrap()
+        .complete_stream_cancellable(&request(), Some(&cancel), &mut |_| {})
+        .unwrap_err();
+    let elapsed = start.elapsed();
+    assert!(matches!(err, ModelError::Cancelled), "got {err}");
+    assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
+}

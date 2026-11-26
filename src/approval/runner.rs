@@ -2,7 +2,7 @@ use crate::approval::lexical::{check_shell_command, CommandCheck};
 use crate::approval::prompt::ApprovalPrompt;
 use crate::gate::tool_log::ToolLog;
 use crate::guard::path::check_write_path;
-use crate::guard::process::{run_bounded, DEFAULT_OUT_CAP};
+use crate::guard::process::{run_bounded_cancellable, DEFAULT_OUT_CAP};
 use crate::guard::GuardError;
 use crate::manifest::record::{capture, record_path, save_manifest, PathRecord, StepManifest};
 use crate::manifest::snapshot::{reconcile, snapshot_guard_set, GuardSetSnapshot, ReconcileResult};
@@ -86,6 +86,29 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
     prompt: &mut ApprovalPrompt<R, W>,
     tool_log: &mut ToolLog,
 ) -> Result<CommandOutput, ExecutionError> {
+    execute_guarded_command_cancellable(
+        root,
+        cmd_str,
+        session_id,
+        step_id,
+        timeout_secs,
+        prompt,
+        tool_log,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_guarded_command_cancellable<R: BufRead, W: Write>(
+    root: &Path,
+    cmd_str: &str,
+    session_id: &str,
+    step_id: usize,
+    timeout_secs: u64,
+    prompt: &mut ApprovalPrompt<R, W>,
+    tool_log: &mut ToolLog,
+    cancel: Option<&crate::agent::CancelToken>,
+) -> Result<CommandOutput, ExecutionError> {
     let guard_set_paths: Vec<PathBuf> = ignore::WalkBuilder::new(root)
         .hidden(false)
         .build()
@@ -129,12 +152,13 @@ pub fn execute_guarded_command<R: BufRead, W: Write>(
 
     let argv = ["sh", "-c", cmd_str];
     let timeout = Duration::from_secs(timeout_secs);
-    let res = run_bounded(&argv, root, timeout, DEFAULT_OUT_CAP).map_err(|e| {
-        ExecutionError::Recovery {
-            path: recovery_path.clone(),
-            reason: e.to_string(),
-        }
-    })?;
+    let res =
+        run_bounded_cancellable(&argv, root, timeout, DEFAULT_OUT_CAP, cancel).map_err(|e| {
+            ExecutionError::Recovery {
+                path: recovery_path.clone(),
+                reason: e.to_string(),
+            }
+        })?;
 
     let snap_after =
         snapshot_guard_set(root, Some(&snap_before)).map_err(|e| ExecutionError::Recovery {

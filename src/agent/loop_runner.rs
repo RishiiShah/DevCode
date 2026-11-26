@@ -1,4 +1,4 @@
-use crate::agent::model::{Message, Model, ModelError, Request, Role};
+use crate::agent::model::{CancelToken, Message, Model, ModelError, Request, Role, StreamChunk};
 use crate::agent::tool::ToolRegistry;
 use crate::discipline::summary::TaskSummary;
 use crate::profile::Profile;
@@ -12,6 +12,7 @@ pub enum ExitReason {
     FormatErrorLimitExceeded,
     RateLimited,
     NoProgress,
+    Cancelled,
 }
 
 /// Live progress notifications for a UI. Never carries file contents beyond a short preview.
@@ -19,6 +20,8 @@ pub enum ExitReason {
 pub enum ProgressEvent {
     /// A model request started (1-based step number).
     Thinking { step: usize },
+    /// The model emitted reasoning / thinking tokens.
+    Reasoning { text: String },
     /// The model produced text (a final answer or commentary before tool calls).
     Assistant { text: String },
     /// A tool call is about to run.
@@ -99,6 +102,7 @@ pub struct LoopLimits {
     /// When a progress sink is set, deliver assistant text as it arrives.
     /// No sink (for example `--plain`) stays on one `complete` call.
     pub stream: bool,
+    pub cancel: Option<CancelToken>,
 }
 
 impl LoopLimits {
@@ -106,6 +110,10 @@ impl LoopLimits {
         if let Some(sink) = &self.progress {
             (sink.0)(event);
         }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
     }
 }
 
@@ -119,6 +127,7 @@ impl Default for LoopLimits {
             trace: false,
             progress: None,
             stream: true,
+            cancel: None,
         }
     }
 }
@@ -213,6 +222,9 @@ fn run_loop(
         .collect();
 
     let exit_reason = 'agent: loop {
+        if limits.is_cancelled() {
+            break ExitReason::Cancelled;
+        }
         if steps >= limits.max_steps {
             break ExitReason::StepLimitExceeded;
         }
@@ -236,24 +248,39 @@ fn run_loop(
 
         let step_start = Instant::now();
         limits.emit(ProgressEvent::Thinking { step: steps + 1 });
-        let completion = if limits.stream && limits.progress.is_some() {
-            let mut buffer = String::new();
-            model.complete_stream(&req, &mut |delta| {
-                buffer.push_str(delta);
-                if !buffer.trim().is_empty() {
-                    limits.emit(ProgressEvent::Assistant {
-                        text: buffer.clone(),
-                    });
-                }
-            })
-        } else {
-            model.complete(&req)
-        };
+        let completion =
+            if limits.stream && limits.progress.is_some() {
+                let mut buffer = String::new();
+                let mut reasoning_buffer = String::new();
+                model.complete_stream_cancellable(&req, limits.cancel.as_ref(), &mut |chunk| {
+                    match chunk {
+                        StreamChunk::Text(delta) => {
+                            buffer.push_str(delta);
+                            if !buffer.trim().is_empty() {
+                                limits.emit(ProgressEvent::Assistant {
+                                    text: buffer.clone(),
+                                });
+                            }
+                        }
+                        StreamChunk::Reasoning(delta) => {
+                            reasoning_buffer.push_str(delta);
+                            if !reasoning_buffer.trim().is_empty() {
+                                limits.emit(ProgressEvent::Reasoning {
+                                    text: reasoning_buffer.clone(),
+                                });
+                            }
+                        }
+                    }
+                })
+            } else {
+                model.complete_cancellable(&req, limits.cancel.as_ref())
+            };
         let mut response = match completion {
             Ok(resp) => {
                 consecutive_format_errors = 0;
                 resp
             }
+            Err(ModelError::Cancelled) => break ExitReason::Cancelled,
             Err(ModelError::FormatError(err_msg)) => {
                 consecutive_format_errors += 1;
                 if consecutive_format_errors >= limits.max_consecutive_format_errors {
@@ -379,6 +406,9 @@ fn run_loop(
         let wait_before = tools.approval_wait();
         let mut output_bytes = 0;
         for call in &response.tool_calls {
+            if limits.is_cancelled() {
+                break 'agent ExitReason::Cancelled;
+            }
             let edit_path = if matches!(call.name.as_str(), "write_file" | "edit_file") {
                 serde_json::from_str::<serde_json::Value>(&call.arguments)
                     .ok()

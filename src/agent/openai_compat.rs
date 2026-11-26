@@ -1,9 +1,12 @@
-use super::model::{Model, ModelError, Request, Response, ToolCall, Usage};
-use super::sse::{RedactTail, SseParser};
+use super::model::{
+    CancelToken, Model, ModelError, Request, Response, StreamChunk, ToolCall, Usage,
+};
+use super::sse::{
+    drive_ureq_response, sleep_cancellable, spawn_http_json, HttpEvent, RedactTail, SseParser,
+};
 use crate::config::ProviderConfig;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -103,7 +106,7 @@ impl OpenAiCompat {
         req: &Request,
         max_tokens: u32,
     ) -> Result<(Response, Option<String>), ModelError> {
-        self.complete_inner(req, Some(max_tokens), false)
+        self.complete_inner(req, Some(max_tokens), false, None)
     }
 
     pub fn request_body(&self, req: &Request, max_tokens: Option<u32>) -> Value {
@@ -116,7 +119,7 @@ impl OpenAiCompat {
             if let Some(id) = &m.tool_call_id { v["tool_call_id"] = json!(id); }
             if !m.tool_calls.is_empty() { v["tool_calls"] = json!(m.tool_calls.iter().map(|c| {
                 let mut call = json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.arguments}});
-                if let Some(sig) = &c.thought_signature { call["extra_content"] = json!({"google":{"thought_signature":sig}}); }
+                if let Some(sig) = c.gemini_signature() { call["extra_content"] = json!({"google":{"thought_signature":sig}}); }
                 call
             }).collect::<Vec<_>>()); }
             v
@@ -132,17 +135,21 @@ impl OpenAiCompat {
         body
     }
 
-    fn pace(&self) -> Result<(), ModelError> {
+    fn pace(&self, cancel: Option<&CancelToken>) -> Result<(), ModelError> {
         if let Some(rpm) = self.config.max_rpm {
-            let mut last = self
-                .last_request
-                .lock()
-                .map_err(|e| ModelError::Other(e.to_string()))?;
-            let interval = Duration::from_secs_f64(60.0 / f64::from(rpm));
-            if let Some(previous) = *last {
-                std::thread::sleep(interval.saturating_sub(previous.elapsed()));
-            }
-            *last = Some(Instant::now());
+            let wait = {
+                let mut last = self
+                    .last_request
+                    .lock()
+                    .map_err(|e| ModelError::Other(e.to_string()))?;
+                let interval = Duration::from_secs_f64(60.0 / f64::from(rpm));
+                let wait = last
+                    .map(|previous| interval.saturating_sub(previous.elapsed()))
+                    .unwrap_or(Duration::ZERO);
+                *last = Some(Instant::now());
+                wait
+            };
+            sleep_cancellable(cancel, wait)?;
         }
         Ok(())
     }
@@ -150,17 +157,15 @@ impl OpenAiCompat {
     /// `Ok(delay)` retries the same request. Rate-limit exhaustion and every
     /// other status are errors. Limits match `complete`: retry while the 429
     /// count is <= 5 and the 5xx count is <= 2.
-    fn handle_status(
+    fn handle_status_parts(
         &self,
         code: u16,
-        response: ureq::Response,
+        retry_after: Option<u64>,
+        body: String,
         retries: bool,
         rate_attempts: &mut u32,
         server_attempts: &mut u32,
     ) -> Result<Duration, ModelError> {
-        let retry_after = response
-            .header("Retry-After")
-            .and_then(|header| header.parse::<u64>().ok());
         let count = if code == 429 {
             *rate_attempts += 1;
             *rate_attempts
@@ -179,7 +184,6 @@ impl OpenAiCompat {
         if code == 429 && retries {
             return Err(ModelError::RateLimited);
         }
-        let body = response.into_string().unwrap_or_default();
         Err(ModelError::Network(
             self.redact(&format!("HTTP {code}: {body}")),
         ))
@@ -190,6 +194,7 @@ impl OpenAiCompat {
         req: &Request,
         max_tokens: Option<u32>,
         retries: bool,
+        cancel: Option<&CancelToken>,
     ) -> Result<(Response, Option<String>), ModelError> {
         let body = self.request_body(req, max_tokens);
         let url = format!(
@@ -199,87 +204,83 @@ impl OpenAiCompat {
         let mut rate_attempts = 0;
         let mut server_attempts = 0;
         loop {
-            self.pace()?;
-            let mut call = self.client.post(&url);
-            if !self.key.is_empty() {
-                call = call.set("Authorization", &format!("Bearer {}", self.key));
+            if cancel.is_some_and(CancelToken::is_cancelled) {
+                return Err(ModelError::Cancelled);
             }
-            match call.send_json(body.clone()) {
-                Ok(response) => {
-                    let value: Value = response
-                        .into_json()
-                        .map_err(|e| ModelError::FormatError(self.redact(&e.to_string())))?;
-                    return parse_chat_completion(&value, req);
+            self.pace(cancel)?;
+            let client = self.client.clone();
+            let req_url = url.clone();
+            let key = self.key.clone();
+            let payload = body.clone();
+            let rx = spawn_http_json(cancel, move |tx| {
+                let mut call = client.post(&req_url);
+                if !key.is_empty() {
+                    call = call.set("Authorization", &format!("Bearer {key}"));
                 }
-                Err(ureq::Error::Status(code, response)) => {
-                    let delay = self.handle_status(
+                drive_ureq_response(call.send_json(payload), false, tx);
+            });
+            match rx.recv()? {
+                Some(HttpEvent::Json(value)) => return parse_chat_completion(&value, req),
+                Some(HttpEvent::Status {
+                    code,
+                    retry_after,
+                    body,
+                }) => {
+                    let delay = self.handle_status_parts(
                         code,
-                        response,
+                        retry_after,
+                        body,
                         retries,
                         &mut rate_attempts,
                         &mut server_attempts,
                     )?;
-                    std::thread::sleep(delay);
+                    sleep_cancellable(cancel, delay)?;
                 }
-                Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
+                Some(HttpEvent::Format(err)) => {
+                    return Err(ModelError::FormatError(self.redact(&err)));
+                }
+                Some(HttpEvent::Transport(err)) => {
+                    return Err(ModelError::Network(self.redact(&err)));
+                }
+                Some(HttpEvent::Bytes(_)) | Some(HttpEvent::Eof) | None => {
+                    return Err(ModelError::Network("unexpected end of response".into()));
+                }
             }
         }
-    }
-
-    fn read_event_stream(
-        &self,
-        mut reader: impl Read,
-        req: &Request,
-        on_delta: &mut dyn FnMut(&str),
-    ) -> Result<Response, ModelError> {
-        let mut parser = SseParser::new();
-        let mut accum = StreamAccum {
-            raw: String::new(),
-            calls: BTreeMap::new(),
-            usage: Usage::default(),
-            redact: RedactTail::new(&self.key),
-        };
-        let mut buf = [0u8; 4096];
-        let mut done = false;
-        loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(|err| ModelError::Network(self.redact(&err.to_string())))?;
-            if n == 0 {
-                break;
-            }
-            let keep_going = parser.push(&buf[..n], &mut |_event, data| {
-                self.on_sse_data(data, &mut accum, on_delta)
-            })?;
-            if !keep_going {
-                done = true;
-                break;
-            }
-        }
-        if !done {
-            parser.finish(&mut |_event, data| self.on_sse_data(data, &mut accum, on_delta))?;
-        }
-        accum.redact.finish(on_delta);
-        assemble_stream(req, accum.raw, accum.calls, accum.usage)
     }
 
     fn on_sse_data(
         &self,
         data: &str,
         accum: &mut StreamAccum,
-        on_delta: &mut dyn FnMut(&str),
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
     ) -> Result<bool, ModelError> {
         if data.trim() == "[DONE]" {
             return Ok(false);
         }
         let value: Value = serde_json::from_str(data)
             .map_err(|err| ModelError::FormatError(self.redact(&err.to_string())))?;
+        if let Some(reasoning) = value
+            .pointer("/choices/0/delta/reasoning_content")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                value
+                    .pointer("/choices/0/delta/reasoning")
+                    .and_then(Value::as_str)
+            })
+        {
+            accum.reasoning_redact.push(reasoning, &mut |piece| {
+                on_chunk(StreamChunk::Reasoning(piece))
+            });
+        }
         if let Some(content) = value
             .pointer("/choices/0/delta/content")
             .and_then(Value::as_str)
         {
             accum.raw.push_str(content);
-            accum.redact.push(content, on_delta);
+            accum
+                .redact
+                .push(content, &mut |piece| on_chunk(StreamChunk::Text(piece)));
         }
         if let Some(items) = value
             .pointer("/choices/0/delta/tool_calls")
@@ -303,20 +304,12 @@ impl OpenAiCompat {
         }
         Ok(true)
     }
-}
 
-impl Model for OpenAiCompat {
-    fn redact_sensitive(&self, text: &str) -> String {
-        self.redact(text)
-    }
-    fn complete(&self, req: &Request) -> Result<Response, ModelError> {
-        self.complete_inner(req, None, true)
-            .map(|(response, _)| response)
-    }
-    fn complete_stream(
+    fn stream_via_channel(
         &self,
         req: &Request,
-        on_delta: &mut dyn FnMut(&str),
+        cancel: Option<&CancelToken>,
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
     ) -> Result<Response, ModelError> {
         let mut body = self.request_body(req, None);
         body["stream"] = json!(true);
@@ -328,43 +321,134 @@ impl Model for OpenAiCompat {
         let mut rate_attempts = 0;
         let mut server_attempts = 0;
         loop {
-            self.pace()?;
-            let mut call = self.client.post(&url);
-            if !self.key.is_empty() {
-                call = call.set("Authorization", &format!("Bearer {}", self.key));
+            if cancel.is_some_and(CancelToken::is_cancelled) {
+                return Err(ModelError::Cancelled);
             }
-            match call.send_json(body.clone()) {
-                Ok(response) => {
-                    // Status is known before any body byte is consumed. A later
-                    // socket drop or bad event must not issue another request.
-                    if response.header("content-type").is_some_and(|value| {
-                        value.to_ascii_lowercase().contains("text/event-stream")
-                    }) {
-                        return self.read_event_stream(response.into_reader(), req, on_delta);
-                    }
-                    let value: Value = response
-                        .into_json()
-                        .map_err(|e| ModelError::FormatError(self.redact(&e.to_string())))?;
+            self.pace(cancel)?;
+            let client = self.client.clone();
+            let req_url = url.clone();
+            let key = self.key.clone();
+            let payload = body.clone();
+            let rx = spawn_http_json(cancel, move |tx| {
+                let mut call = client.post(&req_url);
+                if !key.is_empty() {
+                    call = call.set("Authorization", &format!("Bearer {key}"));
+                }
+                drive_ureq_response(call.send_json(payload), true, tx);
+            });
+            match rx.recv()? {
+                Some(HttpEvent::Json(value)) => {
                     return parse_chat_completion(&value, req).map(|(response, _)| response);
                 }
-                // The endpoint rejected streaming before a body. Try once without it.
-                Err(ureq::Error::Status(400, response)) => {
-                    let _ = response.into_string();
-                    return self.complete(req);
+                Some(HttpEvent::Status { code: 400, .. }) => {
+                    return self.complete_cancellable(req, cancel);
                 }
-                Err(ureq::Error::Status(code, response)) => {
-                    let delay = self.handle_status(
+                Some(HttpEvent::Status {
+                    code,
+                    retry_after,
+                    body,
+                }) => {
+                    let delay = self.handle_status_parts(
                         code,
-                        response,
+                        retry_after,
+                        body,
                         true,
                         &mut rate_attempts,
                         &mut server_attempts,
                     )?;
-                    std::thread::sleep(delay);
+                    sleep_cancellable(cancel, delay)?;
                 }
-                Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
+                Some(HttpEvent::Format(err)) => {
+                    return Err(ModelError::FormatError(self.redact(&err)));
+                }
+                Some(HttpEvent::Transport(err)) => {
+                    return Err(ModelError::Network(self.redact(&err)));
+                }
+                Some(first) => {
+                    let mut parser = SseParser::new();
+                    let mut accum = StreamAccum {
+                        raw: String::new(),
+                        calls: BTreeMap::new(),
+                        usage: Usage::default(),
+                        redact: RedactTail::new(&self.key),
+                        reasoning_redact: RedactTail::new(&self.key),
+                    };
+                    let mut done = false;
+                    let mut current = Some(first);
+                    while let Some(ev) = current {
+                        match ev {
+                            HttpEvent::Bytes(chunk) => {
+                                let keep_going = parser.push(&chunk, &mut |_event, data| {
+                                    self.on_sse_data(data, &mut accum, on_chunk)
+                                })?;
+                                if !keep_going {
+                                    done = true;
+                                    break;
+                                }
+                            }
+                            HttpEvent::Eof => break,
+                            HttpEvent::Transport(err) => {
+                                return Err(ModelError::Network(self.redact(&err)));
+                            }
+                            HttpEvent::Format(err) => {
+                                return Err(ModelError::FormatError(self.redact(&err)));
+                            }
+                            HttpEvent::Json(_) | HttpEvent::Status { .. } => break,
+                        }
+                        current = rx.recv()?;
+                    }
+                    if !done {
+                        parser.finish(&mut |_event, data| {
+                            self.on_sse_data(data, &mut accum, on_chunk)
+                        })?;
+                    }
+                    accum
+                        .reasoning_redact
+                        .finish(&mut |piece| on_chunk(StreamChunk::Reasoning(piece)));
+                    accum
+                        .redact
+                        .finish(&mut |piece| on_chunk(StreamChunk::Text(piece)));
+                    return assemble_stream(req, accum.raw, accum.calls, accum.usage);
+                }
+                None => return Err(ModelError::Network("unexpected end of response".into())),
             }
         }
+    }
+}
+
+impl Model for OpenAiCompat {
+    fn redact_sensitive(&self, text: &str) -> String {
+        self.redact(text)
+    }
+    fn complete(&self, req: &Request) -> Result<Response, ModelError> {
+        self.complete_cancellable(req, None)
+    }
+    fn complete_cancellable(
+        &self,
+        req: &Request,
+        cancel: Option<&CancelToken>,
+    ) -> Result<Response, ModelError> {
+        self.complete_inner(req, None, true, cancel)
+            .map(|(response, _)| response)
+    }
+    fn complete_stream(
+        &self,
+        req: &Request,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Response, ModelError> {
+        self.complete_stream_cancellable(req, None, &mut |chunk| {
+            if let StreamChunk::Text(piece) = chunk {
+                on_delta(piece);
+            }
+        })
+    }
+    fn complete_stream_cancellable(
+        &self,
+        req: &Request,
+        cancel: Option<&CancelToken>,
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
+    ) -> Result<Response, ModelError> {
+        self.stream_via_channel(req, cancel, on_chunk)
     }
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
         let url = format!("{}/models", self.config.base_url.trim_end_matches('/'));
@@ -412,6 +496,7 @@ struct StreamAccum {
     calls: BTreeMap<u64, PartialTool>,
     usage: Usage,
     redact: RedactTail,
+    reasoning_redact: RedactTail,
 }
 
 fn parse_chat_completion(

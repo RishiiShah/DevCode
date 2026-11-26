@@ -8,6 +8,7 @@ use std::time::Instant;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     User(String),
+    Reasoning(String),
     Assistant(String),
     Tool { name: String, summary: String },
     ToolResult { ok: bool, preview: String },
@@ -77,6 +78,8 @@ pub enum Action {
     Answer(String),
     /// Write `.devcode.json` for this provider, then reload.
     Init(String),
+    /// Cancel an in-flight model stream / agent run.
+    Cancel,
     Quit,
 }
 
@@ -106,8 +109,9 @@ pub struct App {
     history_pos: Option<usize>,
     pending_prompt: String,
     quit_armed: bool,
-    /// A new model call started; its assistant text must not merge into an earlier partial bubble.
+    /// A new model call started; its assistant/reasoning text must not merge into an earlier bubble.
     fresh_bubble: bool,
+    fresh_reasoning: bool,
     pub tick: usize,
     /// Index in `items` of an `Item::Tool` row shown expanded; `None` = all tool cards collapsed.
     pub expanded_tool: Option<usize>,
@@ -157,6 +161,7 @@ impl App {
             pending_prompt: String::new(),
             quit_armed: false,
             fresh_bubble: false,
+            fresh_reasoning: false,
             tick: 0,
             expanded_tool: None,
             models: Vec::new(),
@@ -293,12 +298,33 @@ impl App {
         self.items.push(Item::Assistant(text));
     }
 
+    fn merge_reasoning_progress(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        let fresh = std::mem::take(&mut self.fresh_reasoning);
+        if let (false, Some(Item::Reasoning(last))) = (fresh, self.items.last_mut()) {
+            if text == *last {
+                return;
+            }
+            if text.starts_with(last.as_str()) {
+                *last = text;
+                return;
+            }
+            last.push_str(&text);
+            return;
+        }
+        self.items.push(Item::Reasoning(text));
+    }
+
     fn on_progress(&mut self, p: ProgressEvent) {
         match p {
             ProgressEvent::Thinking { step } => {
                 self.status = Status::Working { step };
                 self.fresh_bubble = true;
+                self.fresh_reasoning = true;
             }
+            ProgressEvent::Reasoning { text } => self.merge_reasoning_progress(text),
             ProgressEvent::Assistant { text } => self.merge_assistant_progress(text),
             ProgressEvent::ToolCall { name, summary } => {
                 self.items.push(Item::Tool { name, summary })
@@ -315,6 +341,7 @@ impl App {
 
     fn on_done(&mut self, result: LoopResult) {
         self.status = Status::Idle;
+        self.quit_armed = false;
         self.pending_prompt.clear();
         self.total_in += result.total_input_tokens;
         self.total_out += result.total_output_tokens;
@@ -357,6 +384,9 @@ impl App {
         }
         match result.exit_reason {
             ExitReason::Completed | ExitReason::NoProgress => {}
+            ExitReason::Cancelled => self.items.push(Item::Info(
+                "cancelled (completed edits stay; /rollback undoes them)".into(),
+            )),
             ExitReason::RateLimited => self.items.push(Item::Error(format!(
                 "rate limited after {} steps; try again shortly",
                 result.steps
@@ -488,10 +518,9 @@ impl App {
         }
         self.quit_armed = true;
         self.items.push(Item::Info(
-            "A run is in progress. Press Ctrl-C again to quit (completed edits stay; /rollback undoes them)."
-                .into(),
+            "cancelling run… (press Ctrl-C again to quit)".into(),
         ));
-        Vec::new()
+        vec![Action::Cancel]
     }
 
     fn on_modal_key(&mut self, key: KeyEvent) -> Vec<Action> {
@@ -1313,11 +1342,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_needs_two_presses_while_working() {
+    fn ctrl_c_cancels_first_then_quits_on_second_press_while_working() {
         let mut a = app();
         type_str(&mut a, "go");
         a.on_key(key(KeyCode::Enter));
-        assert!(a.on_key(ctrl('c')).is_empty());
+        assert!(matches!(&a.on_key(ctrl('c'))[..], [Action::Cancel]));
         assert!(matches!(&a.on_key(ctrl('c'))[..], [Action::Quit]));
     }
 
@@ -2057,5 +2086,43 @@ mod tests {
             i,
             Item::Info(t) if t.contains("/init nim")
         )));
+    }
+
+    #[test]
+    fn reasoning_progress_merges_and_done_cancelled_clears_busy() {
+        use crate::agent::{LoopResult, ProgressEvent};
+        let mut a = app();
+        a.status = Status::Working { step: 1 };
+        a.on_event(Ev::Progress(ProgressEvent::Thinking { step: 1 }));
+        a.on_event(Ev::Progress(ProgressEvent::Reasoning {
+            text: "first ".into(),
+        }));
+        a.on_event(Ev::Progress(ProgressEvent::Reasoning {
+            text: "first step".into(),
+        }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "answer".into(),
+        }));
+        assert!(a
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Reasoning(t) if t == "first step")));
+        assert_eq!(assistant_bubble_texts(&a.items), vec!["answer"]);
+
+        a.on_event(Ev::Done(Box::new(LoopResult {
+            exit_reason: ExitReason::Cancelled,
+            steps: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            messages: Vec::new(),
+            summary: None,
+            verification: None,
+            no_progress: None,
+        })));
+        assert!(!a.is_working());
+        assert!(a
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Info(t) if t.contains("cancelled"))));
     }
 }

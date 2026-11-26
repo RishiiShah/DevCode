@@ -47,6 +47,13 @@ impl ToolRegistry {
             .unwrap_or_default()
     }
 
+    pub(crate) fn cancel_token(&self) -> Option<crate::agent::CancelToken> {
+        self.context
+            .as_ref()
+            .and_then(|c| c.lock().ok())
+            .map(|c| c.cancel.clone())
+    }
+
     pub fn schemas(&self) -> Vec<ToolSchema> {
         self.tools
             .values()

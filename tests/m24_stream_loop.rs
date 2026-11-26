@@ -1,7 +1,7 @@
 use devcode::agent::session::RateLimitedModel;
 use devcode::agent::{
-    run_agent_loop, ExitReason, LoopLimits, Model, ModelError, ProgressEvent, ProgressSink,
-    Request, Response, Role, ToolRegistry, Usage,
+    run_agent_loop, CancelToken, ExitReason, LoopLimits, Model, ModelError, ProgressEvent,
+    ProgressSink, Request, Response, Role, StreamChunk, ToolRegistry, Usage,
 };
 use devcode::Profile;
 use std::sync::{Arc, Mutex};
@@ -149,4 +149,92 @@ fn rate_limited_model_with_sink_calls_inner_stream_once() {
         assistant_texts(&events.lock().unwrap()),
         vec!["hel", "hello", "hello"]
     );
+}
+
+struct ReasoningAndCancelModel {
+    cancel_on_second_chunk: bool,
+}
+
+impl Model for ReasoningAndCancelModel {
+    fn complete(&self, _: &Request) -> Result<Response, ModelError> {
+        Ok(hello())
+    }
+
+    fn complete_stream_cancellable(
+        &self,
+        _: &Request,
+        cancel: Option<&CancelToken>,
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
+    ) -> Result<Response, ModelError> {
+        on_chunk(StreamChunk::Reasoning("step "));
+        on_chunk(StreamChunk::Reasoning("thought"));
+        if self.cancel_on_second_chunk {
+            if let Some(token) = cancel {
+                token.cancel();
+            }
+            return Err(ModelError::Cancelled);
+        }
+        on_chunk(StreamChunk::Text("done"));
+        Ok(Response {
+            text: Some("done".into()),
+            tool_calls: Vec::new(),
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[test]
+fn loop_emits_reasoning_progress_and_cancels_cleanly() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&events);
+    let limits = LoopLimits {
+        stream: true,
+        progress: Some(ProgressSink(Arc::new(move |event| {
+            record.lock().unwrap().push(event);
+        }))),
+        ..LoopLimits::default()
+    };
+    let result = run_agent_loop(
+        Profile::Ask,
+        &ReasoningAndCancelModel {
+            cancel_on_second_chunk: false,
+        },
+        &ToolRegistry::new(),
+        "hi",
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(result.exit_reason, ExitReason::Completed);
+    let reasoning: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            ProgressEvent::Reasoning { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasoning,
+        vec!["step ".to_string(), "step thought".to_string()]
+    );
+
+    let cancel = CancelToken::new();
+    let cancel_limits = LoopLimits {
+        stream: true,
+        cancel: Some(cancel),
+        progress: Some(ProgressSink(Arc::new(|_| {}))),
+        ..LoopLimits::default()
+    };
+    let cancelled = run_agent_loop(
+        Profile::Ask,
+        &ReasoningAndCancelModel {
+            cancel_on_second_chunk: true,
+        },
+        &ToolRegistry::new(),
+        "hi",
+        &cancel_limits,
+    )
+    .unwrap();
+    assert_eq!(cancelled.exit_reason, ExitReason::Cancelled);
 }

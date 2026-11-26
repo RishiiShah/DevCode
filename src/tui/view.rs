@@ -164,6 +164,14 @@ fn transcript_lines(items: &[Item], expanded_tool: Option<usize>) -> Vec<Line<'s
                     Span::styled(text.clone(), Style::new().bold()),
                 ]));
             }
+            Item::Reasoning(text) => {
+                lines.push(Line::raw(""));
+                let reasoning_style = dim.add_modifier(Modifier::ITALIC);
+                for (j, l) in text.lines().enumerate() {
+                    let prefix = if j == 0 { "  · " } else { "    " };
+                    lines.push(Line::styled(format!("{prefix}{l}"), reasoning_style));
+                }
+            }
             Item::Assistant(text) => {
                 lines.push(Line::raw(""));
                 lines.extend(super::markdown::render(text));
@@ -893,5 +901,13 @@ mod tests {
             .join("\n");
         app.cursor = app.input.chars().count();
         render(&mut app, 80, 24);
+    }
+
+    #[test]
+    fn reasoning_item_renders_distinct_prefix() {
+        let mut app = App::new(Profile::Ask, "p".into(), None);
+        app.items.push(Item::Reasoning("thinking line".into()));
+        let screen = render(&mut app, 80, 20);
+        assert!(screen.contains("· thinking line"));
     }
 }

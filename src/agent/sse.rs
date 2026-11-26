@@ -8,7 +8,108 @@
 //! to apply a second redactor. `run_loop` still redacts the raw `Response.text`
 //! after the stream ends; that pass is what stored messages use.
 
-use super::model::ModelError;
+use super::model::{cancel_channel, CancelToken, GateSender, ModelError};
+use std::io::Read;
+
+pub(crate) enum HttpEvent {
+    Bytes(Vec<u8>),
+    Eof,
+    Json(serde_json::Value),
+    Status {
+        code: u16,
+        retry_after: Option<u64>,
+        body: String,
+    },
+    Transport(String),
+    Format(String),
+}
+
+pub(crate) fn spawn_http_json(
+    cancel: Option<&CancelToken>,
+    run: impl FnOnce(&GateSender<HttpEvent>) + Send + 'static,
+) -> super::model::GateReceiver<HttpEvent> {
+    let (tx, rx) = cancel_channel(cancel);
+    std::thread::spawn(move || {
+        run(&tx);
+    });
+    rx
+}
+
+pub(crate) fn drive_ureq_response(
+    result: Result<ureq::Response, ureq::Error>,
+    expect_sse: bool,
+    tx: &GateSender<HttpEvent>,
+) {
+    match result {
+        Ok(response) => {
+            let is_sse = expect_sse
+                && response
+                    .header("content-type")
+                    .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"));
+            if is_sse {
+                let mut reader = response.into_reader();
+                let mut buf = [0u8; 4096];
+                loop {
+                    if tx.is_closed() {
+                        break;
+                    }
+                    match reader.read(&mut buf) {
+                        Ok(0) => {
+                            let _ = tx.send(HttpEvent::Eof);
+                            break;
+                        }
+                        Ok(n) => {
+                            if !tx.send(HttpEvent::Bytes(buf[..n].to_vec())) {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx.send(HttpEvent::Transport(err.to_string()));
+                            break;
+                        }
+                    }
+                }
+            } else {
+                match response.into_json() {
+                    Ok(value) => {
+                        let _ = tx.send(HttpEvent::Json(value));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(HttpEvent::Format(err.to_string()));
+                    }
+                }
+            }
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let retry_after = response
+                .header("Retry-After")
+                .and_then(|s| s.parse::<u64>().ok());
+            let body = response.into_string().unwrap_or_default();
+            let _ = tx.send(HttpEvent::Status {
+                code,
+                retry_after,
+                body,
+            });
+        }
+        Err(err) => {
+            let _ = tx.send(HttpEvent::Transport(err.to_string()));
+        }
+    }
+}
+
+pub(crate) fn sleep_cancellable(
+    cancel: Option<&CancelToken>,
+    duration: std::time::Duration,
+) -> Result<(), ModelError> {
+    if let Some(token) = cancel {
+        if token.sleep(duration) {
+            return Err(ModelError::Cancelled);
+        }
+    } else if !duration.is_zero() {
+        std::thread::sleep(duration);
+    }
+    Ok(())
+}
 
 /// Incremental `key` → `[REDACTED]` replacement.
 ///

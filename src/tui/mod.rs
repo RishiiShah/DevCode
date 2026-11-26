@@ -38,6 +38,7 @@ pub fn run(cli: Cli) -> Result<(), DevCodeError> {
         cli.yes,
     );
     let session = crate::open_session(&cli, prompt)?;
+    let cancel = session.cancel.clone();
     let prefetch = session.has_provider();
     let mut app = App::new(
         session.profile,
@@ -52,7 +53,15 @@ pub fn run(cli: Cli) -> Result<(), DevCodeError> {
 
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
-    let result = event_loop(&mut terminal, &mut app, &cmd_tx, &ans_tx, &ev_rx, &cli);
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &cmd_tx,
+        &ans_tx,
+        &ev_rx,
+        &cancel,
+        &cli,
+    );
     let _ = execute!(
         std::io::stdout(),
         DisableBracketedPaste,
@@ -68,6 +77,7 @@ fn event_loop(
     cmds: &mpsc::Sender<Cmd>,
     answers: &mpsc::Sender<String>,
     events: &mpsc::Receiver<Ev>,
+    cancel: &crate::agent::CancelToken,
     cli: &Cli,
 ) -> std::io::Result<()> {
     loop {
@@ -98,13 +108,20 @@ fn event_loop(
         for action in actions {
             match action {
                 Action::Send(cmd) => {
+                    if matches!(cmd, Cmd::Prompt(_)) {
+                        cancel.reset();
+                    }
                     let _ = cmds.send(cmd);
                 }
                 Action::Answer(line) => {
                     let _ = answers.send(line);
                 }
                 Action::Init(provider) => init(app, cmds, &provider, cli),
-                Action::Quit => return Ok(()),
+                Action::Cancel => cancel.cancel(),
+                Action::Quit => {
+                    cancel.cancel();
+                    return Ok(());
+                }
             }
         }
     }

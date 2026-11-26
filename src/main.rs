@@ -130,6 +130,9 @@ fn print_result(result: &LoopResult) {
     if result.exit_reason == ExitReason::RateLimited {
         eprintln!("rate limited after {} steps", result.steps);
     }
+    if result.exit_reason == ExitReason::Cancelled {
+        eprintln!("cancelled after {} steps", result.steps);
+    }
 }
 fn main() {
     let cli = match Cli::try_parse() {

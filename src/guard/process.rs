@@ -104,6 +104,16 @@ pub fn run_bounded<S: AsRef<str>>(
     timeout: Duration,
     out_cap: usize,
 ) -> Result<RunResult, GuardError> {
+    run_bounded_cancellable(argv, cwd, timeout, out_cap, None)
+}
+
+pub fn run_bounded_cancellable<S: AsRef<str>>(
+    argv: &[S],
+    cwd: &Path,
+    timeout: Duration,
+    out_cap: usize,
+    cancel: Option<&crate::agent::CancelToken>,
+) -> Result<RunResult, GuardError> {
     if argv.is_empty() {
         return Err(GuardError::EmptyCommand);
     }
@@ -218,7 +228,7 @@ pub fn run_bounded<S: AsRef<str>>(
             }
         }
 
-        if start.elapsed() >= timeout {
+        if start.elapsed() >= timeout || cancel.is_some_and(|c| c.is_cancelled()) {
             timed_out = true;
             let pid = child.id() as libc::pid_t;
 
