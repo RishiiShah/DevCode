@@ -4,7 +4,7 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1004-TODO
-REVISION       : 0.2.0
+REVISION       : 0.3.0
 STATUS         : Living tracker (non-normative; specs win on conflict)
 AUTHOR         : DevCode Core Engineering Group
 OWNS           : What is open, what is partial, what comes next
@@ -31,11 +31,12 @@ UPDATED        : 2026-11-26
 ## 2.0 Open Work (Peer Bar)
 
 ### 2.1 Next work order
-1. Finish P10a–P10d to OpenCode/Codex level: Anthropic OAuth and betas, OAuth device-code, keyring as default, live keyed dogfood.
-2. U2a remainder: streamed tool-argument UI, `--plain` streaming, live keyed run. (Mid-stream Ctrl-C cancel and reasoning deltas already landed.)
-3. U13: full-screen TUI dogfood with a live provider, covering the unverified §3.0 features.
-4. Sandbox toward Codex (bwrap / Seatbelt) once accounts and streaming are peer-grade.
-5. A4: signing, when the install path is real.
+1. U13: full-screen TUI dogfood with a live provider. User dogfood found the streaming duplicates and the compaction wrong-question bug; unit tests and render previews did not.
+2. P11: real context window per model. The fixed 32k preset window made compaction run nearly every step.
+3. U16a: persist the conversation to disk; `/resume` builds on it.
+4. U2a remainder: streamed tool-argument UI, `--plain` streaming, live keyed run.
+5. P10a–P10d OAuth breadth (Anthropic/Codex OAuth, device code, keyring default): no user-hit gap yet; after 1–4.
+6. Sandbox toward Codex (bwrap / Seatbelt); A4 signing when the install path is real.
 
 Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate, approvals, discipline, NIM live per RES-012). That is scaffolding, not peer parity.
 
@@ -50,6 +51,8 @@ Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate,
 | P8 | partial | Default `gemini-3-flash-preview` | Catalog churn; no peer-grade model registry |
 | P9 | partial | Prefetch + `App.models` cache on connect/switch | OpenCode durable registry and variants |
 | P10 | partial | Account rows stored\|env\|missing; connect persists; `openai` + `openrouter` presets; Gemini OAuth; opt-in keyring; named slots + `auth switch` | See P10a–d |
+| P11 | open | `context_window` per provider config; presets default 32k; status line shows "% context left" | Per-model window (catalog metadata or table); too-small window triggers compaction every step |
+| P12 | open | Model picker lists the provider catalog | Hide or mark non-chat models (embedding, guard, detector) |
 
 - [ ] **P10a** Native Anthropic Messages adapter (bar: OpenCode/pi). *Landed*: `src/agent/anthropic.rs`, preset `anthropic`, object `tool_choice` (omitted with empty `tools`), `interleaved-thinking` beta header, `/effort` → `thinking.budget_tokens`; tests `m20_anthropic`. *Missing*: Anthropic OAuth, forced SSE on `complete()`, live keyed dogfood.
 - [ ] **P10b** OAuth / device-code login for at least one provider (bar: Codex, gemini-cli). *Landed*: Google OAuth in `src/auth.rs` (`auth login gemini --oauth`, loopback callback, `NO_BROWSER=1` / `--with-stdin` paste-code), `oauth-gemini.json`, auto refresh on expiry and `401`, Code Assist backend `src/agent/code_assist.rs` (`gemini:oauth` slot or fallback); tests `m21_oauth`, `m25_code_assist`. *Missing*: device-code flow, non-Gemini OAuth (Codex, Anthropic), live Google OAuth dogfood.
@@ -63,11 +66,11 @@ Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate,
 | :--- | :--- | :--- | :--- |
 | U1 | partial | Scroll pin, Ctrl-End | Full transcript UX vs Codex/opencode |
 | U2 | started | One progress bubble; SSE text + reasoning deltas (OpenAI, Anthropic, Code Assist); Ctrl-C cancel | Streamed tool-argument UI (U2a) |
-| U3 | partial | Ctrl-T tool cards | Richer tool timeline |
-| U4 | partial | Diff modal scroll clamp | Codex-level permission/diff chrome |
-| U5 | partial | Ctrl-K command palette | OpenCode slash-surface depth |
+| U3 | partial | Grouped tool lines (Explored/Ran/Edited, +N −M), Ctrl-T expands to cards and diffs | Expand any historical group, not only the latest |
+| U4 | partial | Codex-style docked approval panel (numbered diff, option list, Enter = No on risky commands); edit diffs in transcript | Scoped always-allow command rules |
+| U5 | partial | Ctrl-K palette; live slash suggestions; docked pickers open on the current choice | OpenCode slash-surface depth |
 | U6 | partial | In-repo fuzzy scorer | Peer fuzzy quality and ranking |
-| U7 | partial | Idle/working/blocked strip | n/a |
+| U7 | partial | Activity row above input; status line under it (`/status`, `/statusline`: model, context left, tokens, branch, folder, background processes) | n/a |
 | U8 | partial | Shift/Alt+Enter multiline | n/a |
 | U11 | partial | History vs scroll key split | Full-screen ratatui E2E dogfood (RES-013) |
 | U12 | partial | Identical tool-loop → NoProgress | n/a |
@@ -76,8 +79,9 @@ Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate,
 - [ ] **U13** Interactive full-screen TUI dogfood with a live provider (not only `App` unit tests and `--plain`). Gap from RES-013.
 - [ ] **U14** Syntax highlighting & themes (bar: Codex, OpenCode, Mistral Vibe). *Missing*: `syntect` code-fence and diff highlighting in `src/tui/markdown.rs` and `src/tui/view.rs`, italics/links/task-lists, `/theme` picker, `OSC 11` light/dark background auto-detection.
 - [ ] **U15** Composer `@` mentions, `!` shell mode & editor ergonomics (bar: Codex, OpenCode, Pi, Gemini CLI). *Missing*: `@` fuzzy file-mention popup, `!` shell execution mode, `$EDITOR` prompt launch, `[paste #N]` collapse, clipboard image paste, `Ctrl-R` persistent history search, optional Vim mode.
+- [ ] **U16a** Persist the conversation to disk (in memory only today; quitting loses it). Prerequisite for U16.
 - [ ] **U16** Session & compaction UI (bar: OpenCode, Pi, Codex, Cline; `RES-005`). *Missing*: `/resume` (`/sessions`) picker, `/fork` (`/tree`) branching, `/compact` UI trigger (core in `src/discipline/compaction.rs`), `/export`, double-`Esc` prompt `/rewind`.
-- [ ] **U17** Approval, diff & tool-card depth (bar: OpenCode, Codex, Kimi Code, Stakpak). *Missing*: inline reject-with-feedback in `Modal::Approve`/`Confirm`, scoped command-pattern always-allow rules, standalone `/diff` viewer (unified + split), expanding/collapsing arbitrary historical tool cards beyond latest `Ctrl-T`.
+- [ ] **U17** Approval, diff & tool-card depth (bar: OpenCode, Codex, Kimi Code, Stakpak). *Landed*: reject then type the correction, delivered mid-run (`SteerInbox`). *Missing*: scoped command-pattern always-allow rules, standalone `/diff` viewer (unified + split), expanding/collapsing arbitrary historical tool cards beyond latest `Ctrl-T`.
 - [ ] **U18** Terminal protocols & polish (bar: Codex, Pi, Mistral Vibe, OpenCode). *Missing*: synchronized output (`\x1b[?2026h`/`l`), transcript scrollbar thumb, double/triple-click selection, `OSC 8` clickable links, Kitty keyboard protocol, `OSC 9`/`777`/BEL completion alerts, `--no-alt-screen` inline scrollback mode.
 
 P6/P7 (scripted dogfood and the harder Gemini build) are **evidence**, not peer-done boxes.
@@ -94,13 +98,7 @@ P6/P7 (scripted dogfood and the harder Gemini build) are **evidence**, not peer-
 
 ## 3.0 Landed in Working Tree, Not Verified
 
-Found uncommitted on 2026-11-26. **Tests not run in this update**; confirm with `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` before relying on it, then fold into §2.3 rows (peer parity still unproven).
-
-- TUI input: mouse drag selects transcript text and release copies it (`src/tui/clipboard.rs`: OSC 52 plus `pbcopy` / `wl-copy` / `xclip`); follow-ups typed during a run are queued, Esc on empty input pulls the last one back; Esc clears input and Up restores it; paste keeps indentation.
-- TUI batch 3: welcome card; live slash suggestions; Claude Code-style edit diffs (`ProgressEvent::ToolResult.diff`, model still sees "Updated …"); mid-run steering (`SteerInbox`, tests `m26_conversation`); `/ps` `/stop` during runs; drag-select autoscroll and off-screen copy; `/status`, `/statusline` (saved in user settings), git branch, context left; Enter defaults to No on risky commands; idle Ctrl-C needs two presses; paste keeps tabs.
-- TUI status: tool timer and background-process count; `/ps` and `/stop`; `/thinking` toggles reasoning visibility; late reasoning tail updates in place; startup setup hint. New dependency `unicode-width`.
-- Managed processes (`src/tools/managed.rs`, `tests/m23_managed.rs`): a slow start keeps running in the background and can be stopped; readiness probes IPv4 and IPv6 loopback; the real port is read from the log through ANSI codes (Vite moves 5173 → 5174).
-- README quickstart rewritten for `/connect` first-run flow.
+None. The 2026-11-26 TUI batches are committed (from `b8eae92`) and pass `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; they are folded into §2.2–§2.3. Peer parity still needs U13.
 
 ---
 
