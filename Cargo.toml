@@ -2,12 +2,18 @@
 name = "devcode"
 version = "0.1.0"
 edition = "2021"
+description = "Coding-agent harness: minimal, verified, reversible changes"
+repository = "https://github.com/RishiiShah/DevCode"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
 globset = "0.4"
 ignore = "0.4"
 libc = "0.2"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+unicode-width = "0.2"
 regex = "1.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -15,5 +21,14 @@ sha2 = "0.10"
 similar = "2.6"
 ureq = { version = "2.10", features = ["json"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
 [dev-dependencies]
 tempfile = "3.17"
+
+[profile.release]
+strip = true

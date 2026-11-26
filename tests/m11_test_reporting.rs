@@ -13,6 +13,7 @@ use std::path::Path;
 fn call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
         id: name.into(),
+        thought_signature: None,
         name: name.into(),
         arguments: args.to_string(),
     }

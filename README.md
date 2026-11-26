@@ -4,20 +4,22 @@
 
 ---
 
+## Quickstart
+
+On macOS or Linux, install from this checkout with `cargo install --path .`.
+
+1. Open your project directory and run `devcode`.
+2. Run `/connect` and paste an API key into the masked prompt. New installs default to NVIDIA NIM. To use another provider, run `/provider`, choose one, then run `/connect`. Existing keys from supported environment variables or saved accounts work automatically.
+3. Type a prompt and press Enter. Try `/ask` followed by `Where is the retry logic?` for a read-only first run.
+
+Use `/help` for shortcuts, `/model` to pick a model, and Shift+Tab to cycle profiles. Use `/init` to scaffold optional project settings. Build runs without a configured test command finish marked UNVERIFIED.
+
 ## Technical Documentation Suite (ATE-1000 Series)
 
-All engineering specifications are maintained under [`docs/`](docs/) following the **ATE-1000 Technical Documentation Series**:
+Specifications live under [`docs/`](docs/) in the **ATE-1000 series**. Each fact has one owning document and the others cite it by section. Agents: start at [`AGENTS.md`](AGENTS.md), which maps tasks to the sections worth reading.
 
-| Document | Identifier | Revision | Scope |
-| :--- | :--- | :--- | :--- |
-| **[System Architecture](docs/devcode.md)** | `ATE-1000-ARCH` | `0.4.0-draft` | Unified agent loop, dynamic policy profiles, pragmatic sandbox runtime, persisted pre-step rollback, and trusted behavior-based verification gates. |
-| **[Product Requirements](docs/prd.md)** | `ATE-1001-PRD` | `0.4.0-draft` | Product vision, functional requirements (FR-1 to FR-6), testable NFR benchmark recipes, and deterministic quality gates. |
-| **[Codebase Understanding](docs/codebaseunderstanding.md)** | `ATE-1002-CBU` | `0.3.1-draft` | Comparative analysis of indexing archetypes (JIT vs. PageRank vs. Vector), deferred, evidence-gated Tier 2 PageRank engine, and security tool orchestration. |
-| **[Reference Catalog](references/README.md)** | `ATE-1003-REF` | `0.2.0-draft` | Reference source inventory, upstream license compliance, clone acquisition tracking, and peer study scope decisions. |
-
-Empirical research notes supporting these normative standards are maintained under [`docs/research/`](docs/research/) under the **`DEVCODE-RES-00x`** series (informative; the `ATE-100x` documents above are normative, and any requirement change must land in them).
-
----
+| Document | Identifier | Revision | Owns |
+| :---
 
 ## Dynamic Policy Profiles
 
@@ -29,47 +31,41 @@ Empirical research notes supporting these normative standards are maintained und
 | **`debug`** (not built) | Scientific root-cause isolation and regression-free resolution | Scoped Workspace Read/Write | Minimal Reproducer Test (Red $\rightarrow$ Green) |
 | **`security`** (not built) | Vulnerability auditing, secret detection, dependency CVE scan | Read-Only (Local DBs) | Gitleaks (Secrets) + Semgrep (SAST) |
 
-## Quickstart (MVP, macOS and Linux)
+## CLI and diagnostics
 
-Status: working MVP, tested live only with NVIDIA NIM on macOS. `debug` and `security` profiles are not built; Windows is not supported yet.
+Pass a prompt directly, for example `devcode --profile ask "where is the retry logic?"`. Use `devcode --plain` for the line-based REPL or `devcode rollback` to undo the latest run. Each conversation is saved per folder: `devcode -c` continues the latest, `devcode --resume` (or `/resume` in the TUI) picks one.
 
-```sh
-cargo build --release          # binary: target/release/devcode
-export NVIDIA_API_KEY=...      # or the env var named in api_key_env; the key is never stored in config
-```
+For a custom OpenAI-compatible endpoint, set `base_url`, `api_key_env`, and a tool-capable `model` under `provider` in `.devcode.json`.
 
-Create `.devcode.json` in the repository you want to work on:
+`--trace` writes per-step timing and token counts (no file contents) to `trace.jsonl` in the project's state dir (`~/.local/share/devcode/projects/<folder>-<hash>/`, ARCH §4.3). Set `DEVCODE_STREAM=0` to disable TUI streaming. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
 
-```json
-{ "provider": { "kind": "openai_compat",
-                "base_url": "https://integrate.api.nvidia.com/v1",
-                "api_key_env": "NVIDIA_API_KEY",
-                "model": "<a model with tool calling>",
-                "context_window": 32000 },
-  "verification": { "test_command": "python3 -m unittest discover -s tests" } }
-```
+Shell commands stop after 120 seconds. Long-running servers use the `start_process` / `stop_process` tools, which snapshot first, run in their own process group, and reconcile file changes on stop. If a command cannot be reconciled, its error names a retained `recovery/<session>/<step>.json` snapshot in the state dir. Run `devcode recover <session> <step>` to extract original files into `recovered/<session>/<step>` there without overwriting your working tree. Compare before restoring; the snapshot does not distinguish command changes from concurrent user changes or capture newly created paths.
 
-Any OpenAI-compatible endpoint works by changing `base_url`, `api_key_env` and `model` (`--provider nim` is a preset for NIM). Run:
+## Accounts and keys
 
 ```sh
-devcode --profile ask   "where is the retry logic?"      # read-only
-devcode --profile plan  "add rate limiting to the API"   # read-only, structured plan
-devcode --profile build "fix the bug in calc.py"         # edits with approval, test gate
-devcode rollback                                         # undo the whole latest run
+devcode auth login nim            # hidden prompt; or --with-stdin
+devcode auth login nim:work       # named slot (one colon, alias [A-Za-z0-9_-]+)
+devcode auth switch nim:work      # select the stored key; beats the env var for that connector
+devcode auth login gemini --oauth # Google browser/loopback OAuth (or NO_BROWSER=1 paste-code) -> oauth-gemini.json (Code Assist)
+devcode auth list | logout NAME
 ```
 
-`--trace` writes per-step timing and token counts (no file contents) to `.devcode/trace.jsonl`. Do not paste input while `devcode` runs: approval prompts read stdin. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
+Key order: an explicit `auth switch` / `/connect NAME:alias` wins, then the env var named by `api_key_env`, then the stored default key. Keys live in `credentials.json` (0600, outside the workspace). `DEVCODE_CREDENTIALS_STORE=auto` tries the OS keyring first and falls back to the file; the default is the file only.
+
+## Install
+
+Works today (needs a Rust toolchain; no release has been published yet):
+
+```sh
+cargo install --git https://github.com/RishiiShah/DevCode
+```
+
+Prepared but not yet published, see [`packaging/README.md`](packaging/README.md): `install.sh` for release binaries, a Homebrew formula, and `pip`/`pipx` wheels built with maturin.
 
 ## Platforms & Install (planned)
 
-Beta: a static site on Cloudflare Pages (`<project>.pages.dev`) serves the two installer scripts; release binaries live in GitHub Releases on a personal account. No organization and no custom domain. `<install-host>` is that subdomain, still a placeholder because the product name is undecided; nothing below works today.
-
-Tier 1: macOS, Linux (glibc/musl), Windows 11. Single self-contained native Rust binary per target; one-line installer is the primary channel (`ATE-1001-PRD` FR-6, `ATE-1000-ARCH` §6.2–6.3). Releases are signed via minisign (Ed25519); Sigstore provenance attestations are planned.
-
-```sh
-curl -fsSL https://<install-host>/install.sh | sh   # macOS, Linux, WSL2
-irm https://<install-host>/install.ps1 | iex        # Windows PowerShell
-```
+Tier 1: macOS, Linux (glibc/musl), Windows 11; one self-contained Rust binary per target. The one-line installers (`install.sh`, `install.ps1`) are prepared but not published, and `<install-host>` is still a placeholder because the product name is undecided. Hosting, signing, and installer requirements: `ATE-1000-ARCH` §6.3 and `ATE-1001-PRD` FR-6.
 
 ## Delivery Priorities
 

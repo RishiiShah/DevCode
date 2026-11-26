@@ -1,0 +1,4 @@
+# Tests and `cargo run` keep DevCode's per-project state under target/, not in the user's
+# data directory. An installed binary is not affected.
+[env]
+DEVCODE_STATE_DIR = { value = "target/devcode-state", relative = true }

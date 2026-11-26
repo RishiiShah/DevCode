@@ -5,7 +5,7 @@ pub mod snapshot;
 
 pub use blob::{read_blob, store_blob};
 pub use record::{record_path, FileType, PathRecord, StepManifest};
-pub use rollback::{rollback, rollback_latest, RollbackReport};
+pub use rollback::{recover_snapshot, rollback, rollback_latest, RollbackReport};
 pub use snapshot::{
     reconcile, snapshot_guard_set, FileFingerprint, GuardSetSnapshot, ReconcileResult,
     MAX_GUARD_SET_FILES, MAX_PER_FILE_BYTES, MAX_TOTAL_BLOB_BYTES,

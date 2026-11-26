@@ -15,6 +15,7 @@ use std::sync::Mutex;
 fn call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
         id: name.into(),
+        thought_signature: None,
         name: name.into(),
         arguments: args.to_string(),
     }
@@ -49,6 +50,33 @@ fn write(path: &str, text: &str) -> ToolCall {
 }
 fn cmd() -> ToolCall {
     call("run_command", json!({"command":"true"}))
+}
+fn read(path: &str) -> ToolCall {
+    call("read_file", json!({"path": path}))
+}
+#[test]
+fn identical_tool_calls_stop_no_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("x.txt"), "hello").unwrap();
+    let tools = tools(dir.path());
+    let same_read = read("x.txt");
+    let model = ScriptedModel::new(vec![
+        response(vec![same_read.clone()]),
+        response(vec![same_read.clone()]),
+        response(vec![same_read]),
+    ]);
+    let result = run_agent_with_config(
+        Profile::Ask,
+        &model,
+        &tools,
+        "task",
+        &LoopLimits::default(),
+        dir.path(),
+        &Config::default(),
+    )
+    .unwrap();
+    assert_eq!(result.exit_reason, ExitReason::NoProgress);
+    assert!(result.no_progress.is_some());
 }
 #[test]
 fn flip_flop_stops_no_progress() {
@@ -90,6 +118,33 @@ impl Model for ChangeAfterTest {
         }
         self.inner.complete(r)
     }
+}
+#[test]
+fn repeated_reads_with_changed_output_continue() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("x.txt");
+    std::fs::write(&file, "initial").unwrap();
+    let model = ChangeAfterTest {
+        inner: ScriptedModel::new(vec![
+            response(vec![read("x.txt")]),
+            response(vec![read("x.txt")]),
+            response(vec![read("x.txt")]),
+            response(vec![]),
+        ]),
+        file,
+        calls: Mutex::new(0),
+    };
+    let result = run_agent_with_config(
+        Profile::Ask,
+        &model,
+        &tools(dir.path()),
+        "task",
+        &LoopLimits::default(),
+        dir.path(),
+        &Config::default(),
+    )
+    .unwrap();
+    assert_eq!(result.exit_reason, ExitReason::Completed);
 }
 #[test]
 fn external_change_after_test_blocks_finish() {

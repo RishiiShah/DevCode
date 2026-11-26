@@ -6,6 +6,97 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// Extracts a pre-command snapshot without overwriting the working tree.
+pub fn recover_snapshot(root: &Path, session: &str, step: usize) -> Result<PathBuf, ManifestError> {
+    if session.is_empty() || session == "." || session == ".." || session.contains(['/', '\\']) {
+        return Err(ManifestError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid session name",
+        )));
+    }
+    let source = crate::state::dir(root)
+        .join("recovery")
+        .join(session)
+        .join(format!("{step}.json"));
+    let data = fs::read(source).map_err(ManifestError::Io)?;
+    let snapshot: crate::manifest::GuardSetSnapshot =
+        serde_json::from_slice(&data).map_err(ManifestError::Serialization)?;
+    for (path, record) in &snapshot.files {
+        if path.as_os_str().is_empty()
+            || path
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(ManifestError::Conflict {
+                path: path.clone(),
+                reason: "invalid recovery path".into(),
+            });
+        }
+        if record.file_type == FileType::File {
+            let hash = record
+                .sha256
+                .as_ref()
+                .ok_or_else(|| ManifestError::Conflict {
+                    path: path.clone(),
+                    reason: "missing recovery blob".into(),
+                })?;
+            read_blob(root, hash)?;
+        }
+        if path
+            .ancestors()
+            .skip(1)
+            .any(|p| snapshot.files.contains_key(p))
+        {
+            return Err(ManifestError::Conflict {
+                path: path.clone(),
+                reason: "recovery path has a non-directory parent".into(),
+            });
+        }
+    }
+    let dest = crate::state::dir(root)
+        .join("recovered")
+        .join(session)
+        .join(step.to_string());
+    fs::create_dir_all(
+        dest.parent()
+            .ok_or_else(|| ManifestError::Io(std::io::Error::other("invalid destination")))?,
+    )
+    .map_err(ManifestError::Io)?;
+    fs::create_dir(&dest).map_err(ManifestError::Io)?;
+    for (path, record) in &snapshot.files {
+        let target = dest.join(path);
+        fs::create_dir_all(
+            target
+                .parent()
+                .ok_or_else(|| ManifestError::Io(std::io::Error::other("invalid path")))?,
+        )
+        .map_err(ManifestError::Io)?;
+        match record.file_type {
+            FileType::File => {
+                let hash = record
+                    .sha256
+                    .as_ref()
+                    .ok_or_else(|| ManifestError::Io(std::io::Error::other("missing blob")))?;
+                fs::write(&target, read_blob(root, hash)?).map_err(ManifestError::Io)?;
+                fs::set_permissions(&target, fs::Permissions::from_mode(record.mode))
+                    .map_err(ManifestError::Io)?;
+            }
+            FileType::Symlink => {
+                let link = record.symlink_target.as_ref().ok_or_else(|| {
+                    ManifestError::Io(std::io::Error::other("missing symlink target"))
+                })?;
+                symlink(link, &target).map_err(ManifestError::Io)?;
+            }
+            FileType::Dir => {
+                return Err(ManifestError::Io(std::io::Error::other(
+                    "unexpected directory",
+                )))
+            }
+        }
+    }
+    Ok(dest)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RollbackReport {
     pub restored_paths: Vec<PathBuf>,
@@ -20,7 +111,7 @@ pub fn rollback(
     session_id: &str,
     target_step: Option<usize>,
 ) -> Result<RollbackReport, ManifestError> {
-    let session_dir = root.join(".devcode").join("manifests").join(session_id);
+    let session_dir = crate::state::dir(root).join("manifests").join(session_id);
     if !session_dir.exists() {
         return Ok(RollbackReport::default());
     }
@@ -191,6 +282,17 @@ pub fn rollback(
                             }
                         };
                         let bytes = read_blob(root, blob_ref)?;
+                        if fs::symlink_metadata(&full_path)
+                            .is_ok_and(|m| m.file_type().is_symlink())
+                        {
+                            fs::remove_file(&full_path).map_err(|source| {
+                                ManifestError::PartialRecovery {
+                                    restored: restored_paths.clone(),
+                                    failed_path: pre.path.clone(),
+                                    source,
+                                }
+                            })?;
+                        }
                         if let Err(source) = fs::write(&full_path, &bytes) {
                             return Err(ManifestError::PartialRecovery {
                                 restored: restored_paths,
@@ -205,17 +307,28 @@ pub fn rollback(
                         restored_paths.push(pre.path.clone());
                     }
                     Some(FileType::Symlink) => {
+                        let target =
+                            pre.symlink_target
+                                .as_ref()
+                                .ok_or_else(|| ManifestError::Conflict {
+                                    path: pre.path.clone(),
+                                    reason: "missing symlink target in pre-state".into(),
+                                })?;
                         if full_path.exists() || fs::symlink_metadata(&full_path).is_ok() {
-                            let _ = fs::remove_file(&full_path);
-                        }
-                        if let Some(target) = &pre.symlink_target {
-                            if let Err(source) = symlink(target, &full_path) {
-                                return Err(ManifestError::PartialRecovery {
-                                    restored: restored_paths,
+                            fs::remove_file(&full_path).map_err(|source| {
+                                ManifestError::PartialRecovery {
+                                    restored: restored_paths.clone(),
                                     failed_path: pre.path.clone(),
                                     source,
-                                });
-                            }
+                                }
+                            })?;
+                        }
+                        if let Err(source) = symlink(target, &full_path) {
+                            return Err(ManifestError::PartialRecovery {
+                                restored: restored_paths,
+                                failed_path: pre.path.clone(),
+                                source,
+                            });
                         }
                         restored_paths.push(pre.path.clone());
                     }
@@ -245,12 +358,12 @@ pub fn rollback(
     })
 }
 
-/// Finds the latest active session in .devcode/manifests and rolls it back.
+/// Finds the latest active session in the project's state manifests and rolls it back.
 pub fn rollback_latest(
     root: &Path,
     target_step: Option<usize>,
 ) -> Result<RollbackReport, ManifestError> {
-    let manifests_dir = root.join(".devcode").join("manifests");
+    let manifests_dir = crate::state::dir(root).join("manifests");
     if !manifests_dir.exists() {
         return Err(ManifestError::ManifestNotFound {
             session_id: "latest".to_string(),

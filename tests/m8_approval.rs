@@ -39,6 +39,122 @@ fn test_diff_formatting() {
 }
 
 #[test]
+fn timed_out_command_is_not_a_passing_test() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut prompt = ApprovalPrompt::new(Cursor::new(b""), Vec::new(), true, true);
+    let mut log = ToolLog::new();
+    let cmd = "sleep 30 &";
+    let result =
+        execute_guarded_command(temp.path(), cmd, "timeout", 1, 1, &mut prompt, &mut log).unwrap();
+    assert!(result.timed_out);
+    assert_ne!(
+        log.check_status_for_command(cmd),
+        devcode::gate::CheckStatus::Fresh
+    );
+}
+
+#[test]
+fn oversized_post_command_file_can_be_rolled_back() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("a"), "original").unwrap();
+    let mut prompt = ApprovalPrompt::new(Cursor::new(b""), Vec::new(), true, true);
+    let mut log = ToolLog::new();
+    execute_guarded_command(
+        temp.path(),
+        "python3 -c 'open(\"a\",\"wb\").write(b\"x\" * 11000000)'",
+        "large",
+        1,
+        10,
+        &mut prompt,
+        &mut log,
+    )
+    .unwrap();
+    devcode::manifest::rollback(temp.path(), "large", None).unwrap();
+    assert_eq!(fs::read(temp.path().join("a")).unwrap(), b"original");
+}
+
+#[test]
+fn failed_post_snapshot_preserves_recovery_data() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("a"), "original").unwrap();
+    let mut prompt = ApprovalPrompt::new(Cursor::new(b""), Vec::new(), true, true);
+    let mut log = ToolLog::new();
+    let error = execute_guarded_command(
+        temp.path(),
+        "python3 -c 'from pathlib import Path; [Path(str(i)).touch() for i in range(5001)]'",
+        "recovery",
+        1,
+        30,
+        &mut prompt,
+        &mut log,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("recovery snapshot retained"));
+    let snapshot: devcode::manifest::GuardSetSnapshot = serde_json::from_slice(
+        &fs::read(devcode::state::dir(temp.path()).join("recovery/recovery/1.json")).unwrap(),
+    )
+    .unwrap();
+    let hash = snapshot.files[Path::new("a")].sha256.as_ref().unwrap();
+    assert_eq!(
+        devcode::manifest::read_blob(temp.path(), hash).unwrap(),
+        b"original"
+    );
+    let recovered = devcode::manifest::recover_snapshot(temp.path(), "recovery", 1).unwrap();
+    assert_eq!(fs::read(recovered.join("a")).unwrap(), b"original");
+    assert!(devcode::manifest::recover_snapshot(temp.path(), "recovery", 1).is_err());
+}
+
+#[test]
+fn find_delete_is_reconciled_and_rolled_back() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("victim"), "original").unwrap();
+    let mut prompt = ApprovalPrompt::new(Cursor::new(b""), Vec::new(), true, true);
+    let mut log = ToolLog::new();
+    let result = execute_guarded_command(
+        temp.path(),
+        "find . -name victim -delete",
+        "find",
+        1,
+        5,
+        &mut prompt,
+        &mut log,
+    )
+    .unwrap();
+    assert_eq!(
+        result.reconciled.unwrap().deleted,
+        vec![PathBuf::from("victim")]
+    );
+    devcode::manifest::rollback(temp.path(), "find", None).unwrap();
+    assert_eq!(
+        fs::read_to_string(temp.path().join("victim")).unwrap(),
+        "original"
+    );
+}
+
+#[test]
+fn shell_symlink_deletion_restores_original_target() {
+    let temp = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("missing-target", temp.path().join("link")).unwrap();
+    let mut prompt = ApprovalPrompt::new(Cursor::new(b""), Vec::new(), true, true);
+    let mut log = ToolLog::new();
+    execute_guarded_command(
+        temp.path(),
+        "python3 -c 'import os; os.unlink(\"link\")'",
+        "link",
+        1,
+        5,
+        &mut prompt,
+        &mut log,
+    )
+    .unwrap();
+    devcode::manifest::rollback(temp.path(), "link", None).unwrap();
+    assert_eq!(
+        fs::read_link(temp.path().join("link")).unwrap(),
+        PathBuf::from("missing-target")
+    );
+}
+
+#[test]
 fn test_lexical_guard_table_test_25_cases() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -385,6 +501,9 @@ fn test_cli_rollback_subcommand_execution() {
         profile: devcode::Profile::Build,
         yes: false,
         trace: false,
+        plain: false,
+        continue_last: false,
+        resume: None,
         command: Some(CliCommand::Rollback { step: None }),
         prompt: None,
     };

@@ -52,5 +52,6 @@ Labels: **production data** (measured in these runs) | **guess**.
 ## Not checked
 
 - Any comparison with another agent on the same task (the thesis claim about tokens per task is untested).
-- A second provider; `provider.extra_body` live; Linux live runs; tasks larger than two files; repeated runs for variance.
+- `provider.extra_body` / effort live on a real task; Linux live runs; tasks larger than two files; repeated runs for variance.
+- Second provider full path: see RES-013 (`docs/research/tui-dogfood-and-harder-task.md`) — Gemini ask + multi-file build + effort smoke.
 - Whether the baseline-first rule helps or annoys on repositories with slow test suites.

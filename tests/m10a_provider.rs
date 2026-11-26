@@ -1,6 +1,8 @@
 use devcode::agent::model::{Model, ModelError, Request, ToolSchema};
 use devcode::agent::openai_compat::OpenAiCompat;
-use devcode::config::{parse_config, ProviderConfig, ProviderKind};
+use devcode::config::{
+    parse_config, preset, provider_from_preset, Config, ProviderConfig, ProviderKind,
+};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener};
 use std::sync::{Arc, Mutex};
@@ -57,7 +59,7 @@ fn scripted_server(responses: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<Vec<
                     name.eq_ignore_ascii_case("content-length")
                         .then(|| value.trim().parse().unwrap())
                 })
-                .unwrap();
+                .unwrap_or(0);
             data.resize(header_end + length, 0);
             stream.read_exact(&mut data[header_end..]).unwrap();
             recorded.lock().unwrap().push(data);
@@ -98,7 +100,9 @@ fn rejects_invalid_arguments() {
 #[test]
 fn rejects_unsupported_provider() {
     let err = parse_config(r#"{"provider":{"kind":"bad","base_url":"x","api_key_env":"","model":"x","context_window":1}}"#).unwrap_err();
-    assert!(err.to_string().contains("openai_compat"));
+    let text = err.to_string();
+    assert!(text.contains("openai_compat"), "{text}");
+    assert!(text.contains("anthropic"), "{text}");
 }
 
 #[test]
@@ -220,6 +224,33 @@ fn nim_preset_fills_missing_fields() {
     let provider = config.provider.unwrap();
     assert_eq!(provider.base_url, "https://integrate.api.nvidia.com/v1");
     assert_eq!(provider.api_key_env, "NVIDIA_API_KEY");
+    assert_eq!(provider.connector.as_deref(), Some("nim"));
+    assert_eq!(provider.model, "m");
+}
+
+#[test]
+fn gemini_cli_preset_switches_from_nim_defaults() {
+    use clap::Parser;
+    let cli = devcode::Cli::parse_from(["devcode", "--provider", "gemini"]);
+    let mut config = Config {
+        provider: provider_from_preset("nim"),
+        ..Default::default()
+    };
+    cli.apply_provider_preset(&mut config);
+    let provider = config.provider.unwrap();
+    assert_eq!(
+        provider.base_url,
+        "https://generativelanguage.googleapis.com/v1beta/openai"
+    );
+    assert_eq!(provider.api_key_env, "GEMINI_API_KEY");
+    assert_eq!(provider.connector.as_deref(), Some("gemini"));
+    assert_eq!(provider.model, preset("gemini").unwrap().default_model);
+}
+
+#[test]
+fn unknown_cli_provider_is_rejected() {
+    use clap::Parser;
+    assert!(devcode::Cli::try_parse_from(["devcode", "--provider", "nope"]).is_err());
 }
 #[test]
 fn rejects_key_value_in_config() {
@@ -250,4 +281,53 @@ fn extra_body_fake_server() {
     assert!(body["messages"].is_array());
     assert!(body["tools"].is_array());
     assert_eq!(body["stream"], false);
+}
+
+#[test]
+fn thought_signature_is_read_and_echoed_back() {
+    let reply = r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","extra_content":{"google":{"thought_signature":"sig-abc"}},"function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+    let (url, requests) = scripted_server(vec![(200, reply.into()), (200, reply.into())]);
+    let model = OpenAiCompat::new(config(url)).unwrap();
+    let first = model.complete(&request()).unwrap();
+    assert_eq!(
+        first.tool_calls[0].thought_signature.as_deref(),
+        Some("sig-abc")
+    );
+    let mut next = request();
+    next.messages.push(devcode::agent::Message::assistant(
+        "",
+        first.tool_calls.clone(),
+    ));
+    model.complete(&next).unwrap();
+    let sent = requests.lock().unwrap();
+    let body = String::from_utf8_lossy(sent.last().unwrap()).into_owned();
+    let json: serde_json::Value =
+        serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(
+        json.pointer("/messages/1/tool_calls/0/extra_content/google/thought_signature"),
+        Some(&serde_json::json!("sig-abc"))
+    );
+}
+
+#[test]
+fn list_models_strips_gemini_prefix_sorts_and_dedupes() {
+    let reply = r#"{"data":[{"id":"models/gemini-b"},{"id":"gemini-a"},{"id":"gemini-b"}]}"#;
+    let (url, requests) = scripted_server(vec![(200, reply.into())]);
+    let ids = OpenAiCompat::new(config(url))
+        .unwrap()
+        .list_models()
+        .unwrap();
+    assert_eq!(ids, vec!["gemini-a", "gemini-b"]);
+    let sent = String::from_utf8_lossy(&requests.lock().unwrap()[0]).into_owned();
+    assert!(sent.starts_with("GET /models "), "{sent}");
+}
+
+#[test]
+fn list_models_reports_http_errors() {
+    let (url, _) = scripted_server(vec![(401, r#"{"error":"bad key"}"#.into())]);
+    let err = OpenAiCompat::new(config(url))
+        .unwrap()
+        .list_models()
+        .unwrap_err();
+    assert!(err.to_string().contains("HTTP 401"), "{err}");
 }

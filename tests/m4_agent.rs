@@ -49,6 +49,7 @@ fn test_normal_run_ends_on_no_tool_response() {
             text: Some("Invoking echo tool".to_string()),
             tool_calls: vec![ToolCall {
                 id: "call_1".to_string(),
+                thought_signature: None,
                 name: "echo".to_string(),
                 arguments: "hello".to_string(),
             }],
@@ -94,6 +95,7 @@ fn test_tool_error_becomes_observation_not_crash() {
             text: None,
             tool_calls: vec![ToolCall {
                 id: "call_fail_1".to_string(),
+                thought_signature: None,
                 name: "fail".to_string(),
                 arguments: "{}".to_string(),
             }],
@@ -147,6 +149,7 @@ fn test_step_limit_ends_run_with_matching_reason() {
             text: Some(format!("Step {}", i)),
             tool_calls: vec![ToolCall {
                 id: format!("call_{}", i),
+                thought_signature: None,
                 name: "unknown".to_string(),
                 arguments: "".to_string(),
             }],
@@ -164,6 +167,11 @@ fn test_step_limit_ends_run_with_matching_reason() {
         max_consecutive_format_errors: 3,
         context_window: None,
         trace: false,
+        progress: None,
+        stream: true,
+        cancel: None,
+        history: Vec::new(),
+        steer: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -181,6 +189,7 @@ fn test_wall_time_limit_ends_run_with_matching_reason() {
         text: Some("First turn".to_string()),
         tool_calls: vec![ToolCall {
             id: "call_1".to_string(),
+            thought_signature: None,
             name: "unknown".to_string(),
             arguments: "".to_string(),
         }],
@@ -198,6 +207,11 @@ fn test_wall_time_limit_ends_run_with_matching_reason() {
         max_consecutive_format_errors: 3,
         context_window: None,
         trace: false,
+        progress: None,
+        stream: true,
+        cancel: None,
+        history: Vec::new(),
+        steer: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -222,6 +236,11 @@ fn test_consecutive_format_errors_limit_ends_run() {
         max_consecutive_format_errors: 3,
         context_window: None,
         trace: false,
+        progress: None,
+        stream: true,
+        cancel: None,
+        history: Vec::new(),
+        steer: None,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -237,6 +256,7 @@ fn test_token_totals_equal_scripted_usage() {
             text: None,
             tool_calls: vec![ToolCall {
                 id: "c1".to_string(),
+                thought_signature: None,
                 name: "unknown".to_string(),
                 arguments: "".to_string(),
             }],

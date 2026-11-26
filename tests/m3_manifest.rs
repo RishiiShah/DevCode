@@ -6,6 +6,12 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+#[test]
+fn snapshot_fails_when_workspace_cannot_be_walked() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(snapshot_guard_set(&dir.path().join("missing"), None).is_err());
+}
 use std::process::Command;
 use std::time::Instant;
 
@@ -233,14 +239,14 @@ fn test_gate4_external_edit_conflict_and_injected_failures() {
     );
 
     // Verify backups retained
-    assert!(root
-        .join(".devcode/manifests")
+    assert!(devcode::state::dir(root)
+        .join("manifests")
         .join(session)
         .join("1.json")
         .exists());
 
     // Inject capture failure (read-only blob directory)
-    let blobs_dir = root.join(".devcode").join("blobs");
+    let blobs_dir = devcode::state::dir(root).join("blobs");
     fs::create_dir_all(&blobs_dir).unwrap();
     fs::set_permissions(&blobs_dir, fs::Permissions::from_mode(0o444)).unwrap();
 
@@ -280,8 +286,8 @@ fn test_gate4_external_edit_conflict_and_injected_failures() {
         rollback_res
     );
     // Backups retained
-    assert!(r_root
-        .join(".devcode/manifests/session_r_fail/1.json")
+    assert!(devcode::state::dir(r_root)
+        .join("manifests/session_r_fail/1.json")
         .exists());
 
     fs::set_permissions(r_root, fs::Permissions::from_mode(0o755)).unwrap();

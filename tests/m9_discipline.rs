@@ -16,6 +16,39 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 #[test]
+fn compaction_keeps_complete_tool_group_and_unicode() {
+    let config = Config::default();
+    let log = ToolLog::new();
+    let ctx = CompactionContext {
+        context_window: 1000,
+        active_manifest: None,
+        current_diff: "",
+        config: &config,
+        tool_log: &log,
+    };
+    let calls: Vec<ToolCall> = (0..3)
+        .map(|i| ToolCall {
+            id: i.to_string(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            thought_signature: None,
+        })
+        .collect();
+    let messages = vec![
+        Message::user("goal"),
+        Message::assistant("", calls),
+        Message::tool("é".repeat(700), "0"),
+        Message::tool("two", "1"),
+        Message::tool("three", "2"),
+    ];
+    let compacted = compact_messages(&messages, &ctx);
+    assert_eq!(compacted[2].tool_calls.len(), 3);
+    assert_eq!(compacted[3].tool_call_id.as_deref(), Some("0"));
+    assert_eq!(compacted[5].tool_call_id.as_deref(), Some("2"));
+    assert!(compacted[3].content.contains("output truncated"));
+}
+
+#[test]
 fn test_scope_contract_in_scope_and_out_of_scope() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -316,6 +349,7 @@ fn test_end_of_task_summary_line_matches_scripted_run() {
             text: Some("Declaring scope".to_string()),
             tool_calls: vec![ToolCall {
                 id: "call_scope".to_string(),
+                thought_signature: None,
                 name: "declare_scope".to_string(),
                 arguments: serde_json::json!({
                     "files": ["src/app.rs"],
@@ -368,4 +402,36 @@ fn test_end_of_task_summary_line_matches_scripted_run() {
         summary_line,
         "steps: 2, tokens in: 300, tokens out: 80, files edited: 0, tests changed: 0, files changed by commands: 0, outside scope: 0, dependencies added: 0"
     );
+}
+
+#[test]
+fn compaction_pins_the_current_request_not_the_first_question() {
+    let config = Config::default();
+    let log = ToolLog::new();
+    let ctx = CompactionContext {
+        context_window: 1000,
+        active_manifest: None,
+        current_diff: "",
+        config: &config,
+        tool_log: &log,
+    };
+    let call = ToolCall {
+        id: "r".into(),
+        name: "read_file".into(),
+        arguments: "{}".into(),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message::user("what is this repo?"),
+        Message::assistant("A calculator.", vec![]),
+        Message::user("all i see is a black screen for frontend"),
+        Message::assistant("", vec![call]),
+        Message::tool("<!DOCTYPE html>", "r"),
+    ];
+    let compacted = compact_messages(&messages, &ctx);
+    assert_eq!(
+        compacted[0].content,
+        "all i see is a black screen for frontend"
+    );
+    assert!(compacted[1].content.contains("- what is this repo?"));
 }

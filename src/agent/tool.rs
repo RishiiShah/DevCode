@@ -47,6 +47,39 @@ impl ToolRegistry {
             .unwrap_or_default()
     }
 
+    pub(crate) fn cancel_token(&self) -> Option<crate::agent::CancelToken> {
+        self.context
+            .as_ref()
+            .and_then(|c| c.lock().ok())
+            .map(|c| c.cancel.clone())
+    }
+
+    /// Runs `f` on the managed processes and tool log, for UI commands between model turns.
+    /// Handle for listing and stopping managed processes from another thread.
+    pub(crate) fn process_control(&self) -> Option<crate::tools::managed::ProcessControl> {
+        self.context
+            .as_ref()
+            .map(|c| crate::tools::managed::ProcessControl(Arc::clone(c)))
+    }
+
+    /// Diff of the edit the last tool call applied, if it applied one.
+    pub(crate) fn take_diff(&self) -> Option<String> {
+        self.context.as_ref()?.lock().ok()?.last_diff.take()
+    }
+
+    pub(crate) fn with_processes<T>(
+        &self,
+        f: impl FnOnce(
+            &mut crate::tools::managed::ManagedProcesses,
+            &mut crate::gate::tool_log::ToolLog,
+        ) -> T,
+    ) -> Option<T> {
+        let context = self.context.as_ref()?;
+        let mut guard = context.lock().ok()?;
+        let ctx = &mut *guard;
+        Some(f(&mut ctx.processes, &mut ctx.log))
+    }
+
     pub fn schemas(&self) -> Vec<ToolSchema> {
         self.tools
             .values()

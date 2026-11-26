@@ -16,6 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Linux keyring headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -28,4 +32,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
+        env:
+          # Never let a developer/CI auto keyring clobber the host store during tests.
+          DEVCODE_CREDENTIALS_STORE: file
         run: cargo test

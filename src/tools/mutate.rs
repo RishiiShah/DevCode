@@ -1,5 +1,6 @@
-use crate::agent::{Tool, ToolRegistry};
-use crate::approval::{execute_guarded_command, ApprovalPrompt};
+use crate::agent::{CancelToken, Tool, ToolRegistry};
+use crate::approval::runner::execute_guarded_command_cancellable;
+use crate::approval::ApprovalPrompt;
 use crate::discipline::{
     apply_disciplined_file_edit, DeclareScopeTool, ScopeContract, TaskSummary,
 };
@@ -15,10 +16,14 @@ pub struct MutationContext {
     pub(crate) root: PathBuf,
     pub(crate) session: String,
     pub(crate) step: usize,
-    prompt: ApprovalPrompt<Box<dyn BufRead + Send>, Box<dyn Write + Send>>,
+    pub(crate) prompt: ApprovalPrompt<Box<dyn BufRead + Send>, Box<dyn Write + Send>>,
     pub(crate) log: ToolLog,
+    pub(crate) processes: super::managed::ManagedProcesses,
     scope: ScopeContract,
     pub(crate) approval_wait: Arc<Mutex<Duration>>,
+    pub(crate) cancel: CancelToken,
+    /// Unified diff of the last applied edit, for display only; the model sees "Updated …".
+    pub(crate) last_diff: Option<String>,
 }
 
 impl MutationContext {
@@ -43,25 +48,32 @@ impl MutationContext {
                 always_approved: prompt.always_approved,
             },
             log: ToolLog::new(),
+            processes: Default::default(),
+            last_diff: None,
             scope: ScopeContract::new(),
             approval_wait,
+            cancel: CancelToken::new(),
         }
     }
 }
 
-/// Builds the concrete tool registry for one session.
-pub fn registry(root: PathBuf, auto_approve_edits: bool) -> ToolRegistry {
-    let session = format!(
+/// Unique id for one run's manifests and blobs.
+pub fn new_session_id() -> String {
+    format!(
         "{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default()
-    );
+    )
+}
+
+/// Builds the concrete tool registry for one session.
+pub fn registry(root: PathBuf, auto_approve_edits: bool) -> ToolRegistry {
     registry_with_context(MutationContext::new(
         root,
-        session,
+        new_session_id(),
         crate::approval::terminal_prompt(auto_approve_edits),
     ))
 }
@@ -69,6 +81,7 @@ pub fn registry(root: PathBuf, auto_approve_edits: bool) -> ToolRegistry {
 pub fn registry_with_context(context: MutationContext) -> ToolRegistry {
     let root = context.root.clone();
     let scope = context.scope.clone();
+    let cancel = context.cancel.clone();
     let shared = Arc::new(Mutex::new(context));
     let mut tools = ToolRegistry::new();
     tools.context = Some(Arc::clone(&shared));
@@ -80,8 +93,10 @@ pub fn registry_with_context(context: MutationContext) -> ToolRegistry {
         tools.register(MutationTool {
             kind,
             context: Arc::clone(&shared),
+            cancel: cancel.clone(),
         });
     }
+    super::managed::register(&mut tools, Arc::clone(&shared));
     tools
 }
 
@@ -94,6 +109,7 @@ enum Kind {
 struct MutationTool {
     kind: Kind,
     context: Arc<Mutex<MutationContext>>,
+    cancel: CancelToken,
 }
 #[derive(Deserialize)]
 struct WriteArgs {
@@ -123,7 +139,7 @@ impl Tool for MutationTool {
         match self.kind {
             Kind::Write => "Write a file with approval",
             Kind::Edit => "Replace one exact string with approval",
-            Kind::Command => "Run a guarded shell command",
+            Kind::Command => "Run a guarded shell command; stops after 120 seconds. Use start_process for development servers",
         }
     }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -148,6 +164,7 @@ impl Tool for MutationTool {
             prompt,
             log,
             scope,
+            last_diff,
             ..
         } = &mut *ctx;
         *step += 1;
@@ -155,20 +172,39 @@ impl Tool for MutationTool {
             Kind::Command => {
                 let args: CommandArgs = serde_json::from_str(arguments)
                     .map_err(|e| format!("invalid arguments: {e}"))?;
-                let result =
-                    execute_guarded_command(root, &args.command, session, *step, 120, prompt, log)
-                        .map_err(|e| e.to_string())?;
-                Ok(format!(
+                let result = execute_guarded_command_cancellable(
+                    root,
+                    &args.command,
+                    session,
+                    *step,
+                    120,
+                    prompt,
+                    log,
+                    Some(&self.cancel),
+                )
+                .map_err(|e| e.to_string())?;
+                let output = format!(
                     "{}\nexit code: {:?}; timed out: {}",
                     result.stdout_stderr, result.exit_code, result.timed_out
-                ))
+                );
+                if result.timed_out {
+                    Err(format!("{output}\nCommand timed out and its process group was stopped. Start long-running servers in a separate terminal."))
+                } else if result.exit_code != Some(0) {
+                    Err(output)
+                } else {
+                    Ok(output)
+                }
             }
             kind => {
-                let (path, content) = match kind {
+                let (path, old, content) = match kind {
                     Kind::Write => {
                         let args: WriteArgs = serde_json::from_str(arguments)
                             .map_err(|e| format!("invalid arguments: {e}"))?;
-                        (args.path, args.content)
+                        let old = check_write_path(root, Path::new(&args.path))
+                            .ok()
+                            .and_then(|full| std::fs::read_to_string(full).ok())
+                            .unwrap_or_default();
+                        (args.path, old, args.content)
                     }
                     Kind::Edit => {
                         let args: EditArgs = serde_json::from_str(arguments)
@@ -180,10 +216,8 @@ impl Tool for MutationTool {
                         {
                             return Err("old_string must match exactly once".into());
                         }
-                        (
-                            args.path,
-                            old.replacen(&args.old_string, &args.new_string, 1),
-                        )
+                        let new = old.replacen(&args.old_string, &args.new_string, 1);
+                        (args.path, old, new)
                     }
                     Kind::Command => return Err("invalid tool".into()),
                 };
@@ -200,6 +234,7 @@ impl Tool for MutationTool {
                 )
                 .map_err(|e| e.to_string())?;
                 if approved {
+                    *last_diff = Some(crate::approval::diff::format_diff(&old, &content, &path));
                     Ok(format!("Updated {path}"))
                 } else {
                     Err("edit rejected".into())

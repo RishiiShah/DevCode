@@ -25,7 +25,7 @@ fn sha256_digest(input: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Appends a new JSON audit log entry with an unbroken hash chain to `.devcode/audit.log`.
+/// Appends a new JSON audit log entry with an unbroken hash chain to `audit.log` in the project's state dir.
 pub fn append_skip_tests_audit(
     root: &Path,
     actor: &str,
@@ -33,7 +33,7 @@ pub fn append_skip_tests_audit(
     diff_sha: &str,
     reason: &str,
 ) -> std::io::Result<()> {
-    let audit_dir = root.join(".devcode");
+    let audit_dir = crate::state::dir(root);
     fs::create_dir_all(&audit_dir)?;
     let audit_path = audit_dir.join("audit.log");
 
@@ -81,10 +81,10 @@ pub fn append_skip_tests_audit(
     Ok(())
 }
 
-/// Verifies that `.devcode/audit.log` contains an unbroken hash chain.
+/// Verifies that `audit.log` in the project's state dir contains an unbroken hash chain.
 /// Returns an error if any entry was tampered with, deleted, or corrupted.
 pub fn verify_audit_chain(root: &Path) -> Result<(), GateError> {
-    let audit_path = root.join(".devcode").join("audit.log");
+    let audit_path = crate::state::dir(root).join("audit.log");
     if !audit_path.exists() {
         return Ok(());
     }

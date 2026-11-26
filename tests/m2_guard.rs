@@ -4,6 +4,21 @@ use devcode::guard::{
 };
 use std::fs;
 use std::os::unix::fs::symlink;
+
+#[test]
+fn background_child_holding_output_cannot_hang() {
+    let root = tempfile::tempdir().unwrap();
+    let start = std::time::Instant::now();
+    let result = run_bounded(
+        &["sh", "-c", "sleep 30 &"],
+        root.path(),
+        std::time::Duration::from_millis(200),
+        1024,
+    )
+    .unwrap();
+    assert!(result.timed_out);
+    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+}
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};

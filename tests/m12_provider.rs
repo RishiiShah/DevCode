@@ -70,6 +70,7 @@ fn request() -> Request {
 }
 #[test]
 fn resolution_and_401_redaction_and_trace() {
+    std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
     let temp = tempfile::tempdir().unwrap();
     let config_dir = temp.path().join("config");
     let root = temp.path().join("repo");
@@ -135,7 +136,7 @@ fn resolution_and_401_redaction_and_trace() {
     )
     .unwrap();
     assert!(!format!("{:?}", result).contains(stored));
-    let trace = std::fs::read_to_string(root.join(".devcode/trace.jsonl")).unwrap();
+    let trace = std::fs::read_to_string(devcode::state::dir(&root).join("trace.jsonl")).unwrap();
     assert!(!trace.contains(stored));
     assert!(!trace.contains(environment));
 }

@@ -1,8 +1,41 @@
-use devcode::credentials::{load, save};
+use devcode::credentials::{account_lines, load, save};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
+
+fn force_file_store() {
+    std::env::set_var("DEVCODE_CREDENTIALS_STORE", "file");
+}
+
+#[test]
+fn account_lines_mark_active_and_sources() {
+    let mut entries = BTreeMap::new();
+    entries.insert("nim".into(), "x".into());
+    entries.insert("custom-lab".into(), "y".into());
+    let lines = account_lines(&entries, Some("nim"));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("nim  stored") && l.contains('*')),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|l| l.starts_with("gemini  ")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.starts_with("openai  ")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.starts_with("openrouter  ")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("custom-lab  stored (custom)")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains('x') || l.contains('y')));
+}
+
 #[test]
 fn storage_modes_atomic_and_insecure_refusal() {
+    force_file_store();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config");
     let mut values = BTreeMap::new();
@@ -55,6 +88,7 @@ fn auth(
     let mut child = Command::new(env!("CARGO_BIN_EXE_devcode"))
         .current_dir(root)
         .env("DEVCODE_CONFIG_DIR", dir)
+        .env("DEVCODE_CREDENTIALS_STORE", "file")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -73,6 +107,7 @@ fn auth(
 }
 #[test]
 fn login_list_logout_and_reject_argument() {
+    force_file_store();
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let dir = storage.path().join("config");
@@ -105,7 +140,11 @@ fn login_list_logout_and_reject_argument() {
     let listed = auth(root.path(), &dir, &["auth", "list"], None);
     assert!(listed.status.success());
     let output = String::from_utf8(listed.stdout).unwrap();
-    assert!(output.contains("nim stored"));
+    assert!(
+        output.contains("nim  stored"),
+        "expected account status row, got: {output}"
+    );
+    assert!(output.contains("openai  missing") || output.contains("openai  env"));
     assert!(!output.contains(secret));
     let bad = auth(root.path(), &dir, &["auth", "login", "nim", secret], None);
     assert!(!bad.status.success());
@@ -119,6 +158,7 @@ fn login_list_logout_and_reject_argument() {
 }
 #[test]
 fn auth_default_connector_and_no_tty_refusal() {
+    force_file_store();
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let dir = storage.path().join("config");
@@ -148,6 +188,7 @@ fn reject_credentials_inside_workspace() {
 }
 #[test]
 fn inaccessible_file_reports_fix_via_cli() {
+    force_file_store();
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let dir = storage.path().join("config");
@@ -179,6 +220,7 @@ fn run_command_denies_credentials_path() {
     let err = tools
         .execute(&ToolCall {
             id: "1".into(),
+            thought_signature: None,
             name: "run_command".into(),
             arguments: serde_json::json!({"command":"cat $DEVCODE_CONFIG_DIR/credentials.json"})
                 .to_string(),
@@ -225,6 +267,7 @@ fn scripted_run_redacts_tool_output_and_arguments() {
             text: None,
             tool_calls: vec![ToolCall {
                 id: "1".into(),
+                thought_signature: None,
                 name: "read_file".into(),
                 arguments: "synthetic-secret-789".into(),
             }],
@@ -250,6 +293,7 @@ fn scripted_run_redacts_tool_output_and_arguments() {
     )
     .unwrap();
     assert!(!format!("{:?}", result).contains("synthetic-secret-789"));
-    let trace = std::fs::read_to_string(root.path().join(".devcode/trace.jsonl")).unwrap();
+    let trace =
+        std::fs::read_to_string(devcode::state::dir(root.path()).join("trace.jsonl")).unwrap();
     assert!(!trace.contains("synthetic-secret-789"));
 }

@@ -4,9 +4,13 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1002-CBU
-REVISION       : 0.3.1-draft
+REVISION       : 0.3.2-draft
 STATUS         : Working Draft (Engineering Specification)
 AUTHOR         : DevCode Core Engineering Group
+OWNS           : Codebase retrieval design (JIT, Tier 2 PageRank) and security
+                 tool orchestration. Budgets: ATE-1001-PRD NFR-3/4/5.
+SECTIONS       : 2-3 archetypes + trade-offs | 4 dual-tier spec + Tier 2
+                 gate | 5 security tools
 RELATED DOCS   : [docs/devcode.md](devcode.md), [docs/prd.md](prd.md)
 ================================================================================
 ```
@@ -15,142 +19,80 @@ RELATED DOCS   : [docs/devcode.md](devcode.md), [docs/prd.md](prd.md)
 
 ## 1.0 Executive Summary & Objective
 
-This specification formalizes the codebase understanding and semantic graph architecture for the **DevCode** autonomous developer harness. 
-
-To maintain high developer velocity and sub-second startup times, DevCode rejects persistent vector databases and heavy ingestion daemons. Instead, it pairs **Agentic Just-in-Time (JIT) search** (via Rust-native `ripgrep`) with an **on-demand, threshold-gated Topological Graph Engine** (Tree-sitter + Personalized PageRank).
-
-For the overarching harness architecture, refer to [docs/devcode.md](devcode.md). For functional requirements and benchmark recipes, see [docs/prd.md](prd.md).
+DevCode rejects persistent vector databases and heavy ingestion daemons to keep sub-second startup. It pairs **agentic Just-in-Time (JIT) search** (Rust-native `ripgrep`) with an **on-demand, threshold-gated topological graph engine** (Tree-sitter + Personalized PageRank). Harness architecture: ATE-1000-ARCH. Requirements and benchmark recipes: ATE-1001-PRD.
 
 ---
 
 ## 2.0 State-of-the-Art Industry Archetypes
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                         CODEBASE UNDERSTANDING: ARCHITECTURAL ARCHETYPES                          |
-+------------------------------------+-------------------------------+------------------------------+
-| ARCHETYPE A: AGENTIC JIT           | ARCHETYPE B: REPO MAP         | ARCHETYPE C: HYBRID VECTOR   |
-| (Claude Code, Google AGY)          | (Aider, Sourcegraph SCIP)     | (Cursor, Copilot Workspace)  |
-+------------------------------------+-------------------------------+------------------------------+
-| - Zero pre-indexing / no vector DB | - Tree-sitter AST symbol tags | - Merkle-tree change sync    |
-| - Rust-native ripgrep live search  | - Directed call/ref graph     | - AST-aware chunk slicing    |
-| - Ephemeral context accumulation   | - Personalized PageRank       | - Dense HNSW + BM25 sparse   |
-| - Zero startup lag on branch hops  | - Token-budgeted prompt map   | - Cached content-hash embeds |
-+------------------------------------+-------------------------------+------------------------------+
-```
-
 ### 2.1 Archetype A: Agentic Just-in-Time (JIT) Exploration
-- **Representative Systems**: Anthropic Claude Code, Google Antigravity (AGY).
-- **Core Mechanism**: Leverages optimized OS utilities (`Glob` for directory topology, multi-threaded `ripgrep` for regex content matches) without pre-indexing. Context is assembled on-demand through targeted line-range reads.
-- **Strength**: Instant zero-second startup; 100% fresh on git branch hops and rebases.
+- **Systems**: Anthropic Claude Code, Google Antigravity (AGY).
+- **Mechanism**: OS utilities (`Glob` for topology, multi-threaded `ripgrep` for content) with no pre-indexing. Context is assembled on demand through targeted line-range reads. Ephemeral; no vector DB.
+- **Strength**: zero startup; 100% fresh on branch hops and rebases.
 
 ### 2.2 Archetype B: Topological AST Graph & Personalized PageRank
-- **Representative Systems**: Aider, Sourcegraph SCIP / LSIF.
-- **Core Mechanism**: Parses source files into concrete syntax trees using Tree-sitter, extracts definitions and call references, and constructs a directed graph. Runs Personalized PageRank (PPR) biased toward the active working set.
-- **Strength**: Provides structural cross-file awareness inside a compressed token budget (1,000–2,500 tokens).
+- **Systems**: Aider, Sourcegraph SCIP / LSIF.
+- **Mechanism**: Tree-sitter parses source into concrete syntax trees, extracts definitions and call references into a directed graph, and runs Personalized PageRank (PPR) biased toward the active working set. The map is token-budgeted for the prompt.
+- **Strength**: structural cross-file awareness inside 1,000–2,500 tokens.
 
 ### 2.3 Archetype C: Cryptographic Merkle Sync & Hybrid Retrieval
-- **Representative Systems**: Cursor, GitHub Copilot Workspace.
-- **Core Mechanism**: Maintains a vector store with AST-chunked embeddings, synchronizing updates via cryptographic Merkle trees. Searches using dense embeddings combined with BM25 keyword matching via Reciprocal Rank Fusion (RRF).
-- **Strength**: High semantic recall for natural-language conceptual queries.
+- **Systems**: Cursor, GitHub Copilot Workspace.
+- **Mechanism**: A vector store of AST-chunked embeddings, synchronized by Merkle trees, searched with dense embeddings plus BM25 via Reciprocal Rank Fusion (RRF). Cached content-hash embeddings.
+- **Strength**: high semantic recall for natural-language conceptual queries.
 
 ---
 
 ## 3.0 Comparative Evaluation & Trade-off Matrix
 
-| Engineering Criterion | Archetype A: Agentic JIT | Archetype B: Repo Map (PPR) | Archetype C: Hybrid Vector |
+| Criterion | A: Agentic JIT | B: Repo Map (PPR) | C: Hybrid Vector |
 | :--- | :--- | :--- | :--- |
-| **Startup / Indexing Latency** | **0 seconds (Instant)** | 2–8 seconds (Local AST) | 2–10+ minutes (Initial embed) |
-| **Git Branch Switching Lag** | **Zero (Always fresh)** | Delta re-parse (<1 sec) | Merkle sync check required |
-| **Disk & Memory Footprint** | Near zero (Ephemeral) | Minimal (In-memory / SQLite) | High (Vector store / indices) |
-| **Cross-File Symbol Precision** | High (Targeted grep/LSP) | Deterministic (Syntax graph) | Probabilistic (Embedding rank) |
-| **Token Budget Consumption** | Dynamic pay-as-you-explore | Fixed baseline (1k–2.5k tokens)| Search result chunk overhead |
-| **Air-Gapped / Offline Feasibility** | 100% Native | 100% Native | Requires local embedder model |
+| **Startup / indexing latency** | **0 s** | 2–8 s (local AST) | 2–10+ min (initial embed) |
+| **Branch switching lag** | **None (always fresh)** | Delta re-parse (<1 s) | Merkle sync check |
+| **Disk & memory** | Near zero | Minimal (memory / SQLite) | High (vector store) |
+| **Cross-file symbol precision** | High (targeted grep/LSP) | Deterministic (syntax graph) | Probabilistic (embedding rank) |
+| **Token budget** | Pay-as-you-explore | Fixed baseline (1k–2.5k) | Search-chunk overhead |
+| **Air-gapped feasibility** | 100% native | 100% native | Needs local embedder |
 
 ---
 
 ## 4.0 DevCode Dual-Tier Hybrid Graph Specification
 
-DevCode avoids running PageRank speculatively on every simple query. The initial release implements Tier 1 only. The **Dual-Tier Model** below specifies a deferred extension with explicit activation thresholds; those thresholds apply only after the delivery prerequisites in §4.4 pass.
+DevCode does not run PageRank speculatively on every query. The initial release implements Tier 1 only. Tier 2 below is a deferred extension with explicit activation thresholds that apply only after the §4.4 prerequisites pass.
 
-```
-                              [ DevCode Engine ]
-                                      |
-            +-------------------------+-------------------------+
-            |                                                   |
-            v                                                   v
-   +-----------------------+                           +-----------------------+
-   |   TIER 1: JIT LAYER   |                           |  TIER 2: GRAPH ENGINE  |
-   | (Default / Zero Cost) |                           | (Threshold-Gated / PPR)|
-   +-----------------------+                           +-----------------------+
-   | - Embedded ripgrep    |                           | - Tree-sitter AST Map |
-   | - Fast Glob Matcher   |                           | - Dependency DiGraph  |
-   | - Surgical File Read  |                           | - Personalized PageRank|
-   | - Fresh on branch hop |                           | - Token cap: 2,500 tok|
-   +-----------------------+                           +-----------------------+
-```
+- **Tier 1: JIT layer** (default, zero cost): embedded ripgrep, fast glob matcher, surgical file reads.
+- **Tier 2: graph engine** (threshold-gated): Tree-sitter AST map, dependency DiGraph, Personalized PageRank, 2,500-token cap.
 
 ### 4.1 Tier 1: Zero-Latency JIT Layer (Default Path)
-- **Engine**: Embedded Rust `ripgrep` runner coupled with filename globbers.
-- **Latency**: $\le 150\text{ ms}$ on warm disk cache.
-- **System Prompt Token Overhead**: **0 baseline tokens** added to the system prompt; tokens are consumed only for matched file lines during tool results.
+- **Engine**: embedded Rust `ripgrep` runner plus filename globbers.
+- **Latency**: <= 150 ms on warm disk cache.
+- **System prompt overhead**: **0 baseline tokens**; tokens are spent only on matched lines in tool results.
 
 ### 4.2 Tier 2: Topological Graph Engine (Measured Activation Thresholds)
-Tier 2 is **not** activated by guesswork, nor by uncomputable metrics like symbol counts that require parsing to evaluate. It is engaged strictly when one of the following concrete conditions is met:
-
-1. **Repository Scale Threshold**:
-   - The workspace contains $> 300$ source files (determined via fast filesystem directory traversal without opening file contents). This is a provisional tuning threshold, not a measured recall guarantee.
-2. **Measured Tier 1 Miss Rate / Ambiguity**:
-   - When a JIT symbol search yields $> 20$ candidate files across disparate directories.
-   - When a query contains no unique lexical identifier (pure natural language architectural query).
-3. **Explicit Cross-Module Intent**:
-   - When the user explicitly requests an architectural plan, dependency audit, or widespread refactoring via the `plan` profile.
+Tier 2 is **not** activated by guesswork or by metrics that need parsing to evaluate. It engages only when one of these holds:
+1. **Repository scale**: the workspace has > 300 source files (counted by directory traversal without opening files). Provisional tuning threshold, not a measured recall guarantee.
+2. **Measured Tier 1 miss rate or ambiguity**: a JIT symbol search yields > 20 candidate files across disparate directories, or the query has no unique lexical identifier (pure natural-language architectural query).
+3. **Explicit cross-module intent**: the user requests an architectural plan, dependency audit, or widespread refactor via the `plan` profile.
 
 ### 4.3 PageRank Computational & Token Ceilings
-- **Execution Budget**: Graph traversal and PageRank calculation must complete within $\le 2.0\text{ seconds}$ on a 500-file reference repo.
-- **Token Ceiling**: The serialized repository map injected into the prompt must **never exceed 2,500 tokens**. Low-ranked nodes are pruned down to file paths without function signatures to preserve token budget.
+- **Execution budget**: traversal and PageRank complete in <= 2.0 s on a 500-file reference repo (PRD NFR-5).
+- **Token ceiling**: the serialized repository map never exceeds 2,500 tokens. Low-ranked nodes are pruned down to file paths without function signatures.
 
 ### 4.4 Delivery Prerequisites & Evidence
-1. **Initial Release**: Ship JIT search with the unified loop, persisted rollback, and trusted classification gates. Pass PRD Gates 1, 2, 4, and 5 before adding the graph engine.
-2. **Tier 2 Evaluation**: Record JIT failures on a versioned task set with expected relevant files. Compare JIT and JIT-plus-graph recall, elapsed time, and context tokens on identical tasks and repository revisions. Include cross-module queries and branch-change freshness checks.
-3. **Enablement Decision**: Keep Tier 2 deferred until recorded results demonstrate retrieval gains within §4.3 budgets. Record the task set, hardware, results, and selected thresholds before enabling it; repository size alone is not evidence of benefit.
-4. **Fallback**: Missing grammars, graph timeout, or stale graph state falls back to fresh JIT results and reports the limitation. Graph results never relax verification gates.
+1. **Initial release**: ship JIT search with the unified loop, persisted rollback, and trusted classification gates. Pass PRD Gates 1, 2, 4, and 5 before adding the graph engine.
+2. **Tier 2 evaluation**: record JIT failures on a versioned task set with expected relevant files. Compare JIT and JIT-plus-graph recall, elapsed time, and context tokens on identical tasks and repository revisions, including cross-module queries and branch-change freshness checks.
+3. **Enablement decision**: keep Tier 2 deferred until results show retrieval gains within §4.3 budgets. Record the task set, hardware, results, and selected thresholds first; repository size alone is not evidence of benefit.
+4. **Fallback**: missing grammars, graph timeout, or stale graph state falls back to fresh JIT results and reports the limitation. Graph results never relax verification gates.
 
 ---
 
 ## 5.0 Security Analysis Strategy: Tool Orchestration
 
-Rather than attempting to build a custom AST taint-tracking engine (an intractable research project), DevCode adopts a pragmatic **Tool Orchestration Architecture**:
+DevCode orchestrates proven tools instead of building a custom AST taint engine. Three scanners (`gitleaks`, `semgrep`, `osv-scanner`) feed a normalizer layer that deduplicates findings, maps them to file lines, and emits an actionable patch plan (consumed by the `security` profile, ATE-1000-ARCH §3.1; requirements FR-5).
 
-```
-+----------------------------------------------------------------------------------+
-|                          SECURITY AUDITING ORCHESTRATOR                          |
-+----------------------------------------------------------------------------------+
-|                                                                                  |
-|   +-----------------------+  +-----------------------+  +---------------------+  |
-|   |       GITLEAKS        |  |        SEMGREP        |  |     OSV-SCANNER     |  |
-|   |   (Secret Scanner)    |  |    (SAST Analysis)    |  |   (Dependency CVE)  |  |
-|   +-----------+-----------+  +-----------+-----------+  +----------+----------+  |
-|               |                          |                         |             |
-|               +--------------------------+-------------------------+             |
-|                                          |                                       |
-|                                          v                                       |
-|                       +--------------------------------------+                   |
-|                       |  DevCode Security Normalizer Layer   |                   |
-|                       |  - Deduplicates findings             |                   |
-|                       |  - Maps issues to file lines         |                   |
-|                       |  - Emits actionable patch plan       |                   |
-|                       +--------------------------------------+                   |
-|                                                                                  |
-+----------------------------------------------------------------------------------+
-```
-
-1. **Secret Detection**: Runs `gitleaks` against current uncommitted diffs to catch exposed API keys, tokens, and private certificates.
-2. **Static Analysis (SAST)**: Executes `semgrep` with standardized OWASP Top 10 rulesets to detect injection patterns, unsafe deserialization, and path traversals.
-3. **Dependency CVE Auditing**: Executes `osv-scanner` against lockfiles (`package-lock.json`, `poetry.lock`, `Cargo.lock`, `go.sum`).
-4. **Offline-First Vulnerability Database**:
-   - Scans run **strictly offline** using locally cached vulnerability definitions.
-   - Database updates are decoupled from runs and triggered explicitly by the user via `devcode security --update-db`.
+1. **Secret detection**: `gitleaks` against current uncommitted diffs for exposed API keys, tokens, and private certificates.
+2. **Static analysis (SAST)**: `semgrep` with standardized OWASP Top 10 rulesets for injection patterns, unsafe deserialization, and path traversal.
+3. **Dependency CVE auditing**: `osv-scanner` against lockfiles (`package-lock.json`, `poetry.lock`, `Cargo.lock`, `go.sum`).
+4. **Offline-first vulnerability database**: scans run strictly offline against locally cached definitions. Updates are decoupled and triggered by `devcode security --update-db`.
 
 ---
 
@@ -159,8 +101,5 @@ Rather than attempting to build a custom AST taint-tracking engine (an intractab
 - **System Architecture**: [docs/devcode.md](devcode.md) (ATE-1000-ARCH)
 - **Product Requirements**: [docs/prd.md](prd.md) (ATE-1001-PRD)
 - **Reference Catalog**: [references/README.md](../references/README.md) (ATE-1003-REF)
-- **Empirical Research Series**: [docs/research/](research/) (DEVCODE-RES-001 through DEVCODE-RES-010; informative)
-- **External Specifications**:
-  - Tree-sitter CST Grammars (`https://tree-sitter.github.io`)
-  - Semgrep Rule Registry (`https://semgrep.dev/rules`)
-  - Open Source Vulnerabilities Schema (`https://ossf.github.io/osv-schema/`)
+- **Empirical Research Series**: [docs/research/](research/) (DEVCODE-RES-001 through DEVCODE-RES-014; informative)
+- **External**: Tree-sitter grammars (`https://tree-sitter.github.io`), Semgrep Rule Registry (`https://semgrep.dev/rules`), OSV schema (`https://ossf.github.io/osv-schema/`)

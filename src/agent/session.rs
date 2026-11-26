@@ -1,4 +1,5 @@
-use crate::agent::{Model, ModelError, Request, Response, ToolRegistry};
+use crate::agent::sse::sleep_cancellable;
+use crate::agent::{CancelToken, Model, ModelError, Request, Response, StreamChunk, ToolRegistry};
 use crate::gate::{ToolKind, ToolLog};
 use crate::manifest::record::{load_manifest, PathRecord, StepManifest};
 use std::collections::BTreeMap;
@@ -47,8 +48,13 @@ pub fn session_state(tools: &ToolRegistry) -> Result<SessionState, ModelError> {
     let mut changes = Vec::new();
     for (path, record) in pre {
         let old = match record.blob_ref {
-            Some(hash) => crate::manifest::read_blob(&ctx.root, &hash)
-                .map_err(|e| ModelError::Other(e.to_string()))?,
+            Some(hash) => match crate::manifest::read_blob(&ctx.root, &hash) {
+                Ok(bytes) => bytes,
+                // A snapshot deleted from `.devcode/blobs` (for example by `rm -rf`) must not
+                // fail every later step; that path just has no diff to show or restore.
+                Err(crate::manifest::ManifestError::BlobNotFound { .. }) => continue,
+                Err(e) => return Err(ModelError::Other(e.to_string())),
+            },
             None => Vec::new(),
         };
         let new = match std::fs::read(ctx.root.join(&path)) {
@@ -119,17 +125,62 @@ impl Model for RateLimitedModel {
     fn redact_sensitive(&self, text: &str) -> String {
         self.model.redact_sensitive(text)
     }
+    fn list_models(&self) -> Result<Vec<String>, ModelError> {
+        self.model.list_models()
+    }
     fn complete(&self, request: &Request) -> Result<Response, ModelError> {
-        let mut last = self
-            .last
-            .lock()
-            .map_err(|e| ModelError::Other(e.to_string()))?;
-        if let Some(previous) = *last {
-            std::thread::sleep(self.interval.saturating_sub(previous.elapsed()));
-        }
-        *last = Some(Instant::now());
-        drop(last);
-        self.model.complete(request)
+        self.complete_cancellable(request, None)
+    }
+    fn complete_cancellable(
+        &self,
+        request: &Request,
+        cancel: Option<&CancelToken>,
+    ) -> Result<Response, ModelError> {
+        let wait = {
+            let mut last = self
+                .last
+                .lock()
+                .map_err(|e| ModelError::Other(e.to_string()))?;
+            let wait = last
+                .map(|previous| self.interval.saturating_sub(previous.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            *last = Some(Instant::now());
+            wait
+        };
+        sleep_cancellable(cancel, wait)?;
+        self.model.complete_cancellable(request, cancel)
+    }
+    fn complete_stream(
+        &self,
+        request: &Request,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Response, ModelError> {
+        self.complete_stream_cancellable(request, None, &mut |chunk| {
+            if let StreamChunk::Text(piece) = chunk {
+                on_delta(piece);
+            }
+        })
+    }
+    fn complete_stream_cancellable(
+        &self,
+        request: &Request,
+        cancel: Option<&CancelToken>,
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
+    ) -> Result<Response, ModelError> {
+        let wait = {
+            let mut last = self
+                .last
+                .lock()
+                .map_err(|e| ModelError::Other(e.to_string()))?;
+            let wait = last
+                .map(|previous| self.interval.saturating_sub(previous.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            *last = Some(Instant::now());
+            wait
+        };
+        sleep_cancellable(cancel, wait)?;
+        self.model
+            .complete_stream_cancellable(request, cancel, on_chunk)
     }
 }
 

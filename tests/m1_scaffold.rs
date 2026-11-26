@@ -59,15 +59,18 @@ fn test_cli_missing_configuration_and_manifest() {
     let binary = env!("CARGO_BIN_EXE_devcode");
 
     let root = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
     // Root execution
     let output_root = ProcessCommand::new(binary)
         .arg("prompt")
         .current_dir(root.path())
+        .env("DEVCODE_CONFIG_DIR", config.path())
+        .env_remove("NVIDIA_API_KEY")
         .output()
         .expect("failed to execute binary");
     assert_eq!(output_root.status.code(), Some(1));
     let stderr_root = String::from_utf8_lossy(&output_root.stderr);
-    assert!(stderr_root.contains("provider.model is missing"));
+    assert!(stderr_root.contains("devcode auth login"));
 
     // Rollback subcommand
     let output_rollback = ProcessCommand::new(binary)

@@ -1,9 +1,10 @@
 pub mod cap;
 pub mod glob;
 pub mod grep;
+pub mod managed;
 pub mod mutate;
 pub mod read;
-pub use mutate::{registry, registry_with_context, MutationContext};
+pub use mutate::{new_session_id, registry, registry_with_context, MutationContext};
 
 pub use cap::{truncate_output, TOOL_OUTPUT_CAP};
 pub use glob::{glob_paths, GlobTool};
