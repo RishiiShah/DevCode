@@ -120,7 +120,7 @@ impl BufRead for SlowReader {
         self.0.consume(n)
     }
     fn read_line(&mut self, s: &mut String) -> io::Result<usize> {
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(120));
         self.0.read_line(s)
     }
 }
@@ -186,7 +186,7 @@ fn trace_separates_model_tool_and_approval() {
         .collect();
     assert_eq!(rows.len(), 2);
     assert!(rows[0]["model_ms"].as_u64().unwrap() >= 35);
-    assert!(rows[0]["approval_wait_ms"].as_u64().unwrap() >= 35);
+    assert!(rows[0]["approval_wait_ms"].as_u64().unwrap() >= 100);
     assert!(rows[0]["tool_ms"].as_u64().unwrap() < rows[0]["approval_wait_ms"].as_u64().unwrap());
     assert_eq!(rows[1]["tool_name"], "(final)");
     assert_eq!(rows[1]["tool_ms"], 0);

@@ -934,7 +934,6 @@ fn label_parts(label: &str) -> (&str, &str, Option<&str>) {
     (provider, model, effort)
 }
 
-/// Remaining context as a small meter, green → yellow → red as it fills.
 /// "96% context left" as Codex shows it: dim until it runs low, no glyph meter (block glyphs
 /// fall back to odd shapes in many terminal fonts).
 fn context_meter(left: u64) -> Vec<Span<'static>> {
