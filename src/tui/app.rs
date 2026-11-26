@@ -10,6 +10,8 @@ use std::time::Instant;
 pub enum Item {
     /// Startup card: name, version, model, folder (as Claude Code and Codex open).
     Welcome,
+    /// A slash command the user ran; its output (Info lines) nests under it.
+    Command(String),
     User(String),
     Reasoning(String),
     Assistant(String),
@@ -557,10 +559,10 @@ impl App {
                     "off"
                 };
                 self.items
-                    .push(Item::Note(format!("{on}  {name:<10} {about}")));
+                    .push(Item::Info(format!("{on}  {name:<10} {about}")));
             }
             self.items
-                .push(Item::Note("/statusline ITEM shows or hides one".into()));
+                .push(Item::Info("/statusline ITEM shows or hides one".into()));
             return Vec::new();
         };
         if !STATUSLINE_ITEMS.iter().any(|(n, _)| *n == name) {
@@ -1421,6 +1423,7 @@ impl App {
         }
         self.scroll = 0;
         if let Some(rest) = line.strip_prefix('/') {
+            self.items.push(Item::Command(line.clone()));
             return self.slash(rest.trim());
         }
         // A message typed during a run reaches the model at its next step (as Codex steers).
@@ -1530,7 +1533,7 @@ impl App {
             "ps" | "processes" => vec![Action::Processes],
             "status" => {
                 for line in self.status_lines() {
-                    self.items.push(Item::Note(line));
+                    self.items.push(Item::Info(line));
                 }
                 Vec::new()
             }

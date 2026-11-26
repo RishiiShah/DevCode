@@ -189,7 +189,7 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
         Cmd::Connections => {
             let _ = events.send(match session.connections() {
                 Ok(lines) if lines.is_empty() => Ev::Info(vec!["no stored connections".into()]),
-                Ok(lines) => Ev::Info(lines),
+                Ok(lines) => Ev::Info(connection_rows(&lines)),
                 Err(e) => Ev::Failed(e.to_string()),
             });
         }
@@ -263,5 +263,38 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
                 Err(e) => Ev::Failed(e.to_string()),
             });
         }
+    }
+}
+
+/// `name  source [*]` lines as aligned rows: a filled dot and "active" for the current one.
+fn connection_rows(lines: &[String]) -> Vec<String> {
+    let rows: Vec<(String, String, bool)> = lines
+        .iter()
+        .map(|line| {
+            let active = line.ends_with(" *");
+            let line = line.trim_end_matches(" *");
+            let (name, source) = line.split_once("  ").unwrap_or((line, ""));
+            (name.to_string(), source.trim().to_string(), active)
+        })
+        .collect();
+    let width = rows.iter().map(|(n, ..)| n.len()).max().unwrap_or(0);
+    rows.into_iter()
+        .map(|(name, source, active)| {
+            let dot = if active { "●" } else { "○" };
+            let tail = if active { "  · active" } else { "" };
+            format!("{dot} {name:<width$}  {source}{tail}")
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod connection_tests {
+    #[test]
+    fn connection_rows_align_and_mark_the_active_account() {
+        let rows = super::connection_rows(&["nim  stored *".into(), "openrouter  missing".into()]);
+        assert_eq!(
+            rows,
+            vec!["● nim         stored  · active", "○ openrouter  missing"]
+        );
     }
 }

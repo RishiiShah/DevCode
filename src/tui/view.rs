@@ -18,8 +18,12 @@ const INPUT_MIN_HEIGHT: u16 = 3;
 const INPUT_MAX_HEIGHT: u16 = 8;
 
 /// Visual line count for the input pane (soft-wrap at `width` minus borders).
+/// Columns the `› ` prompt takes before the typed text.
+const PROMPT_WIDTH: u16 = 2;
+
 pub(crate) fn wrapped_input_line_count(input: &str, area_width: u16) -> usize {
-    let inner = area_width.saturating_sub(2).max(1) as usize;
+    // Border and one column of padding on each side, then the prompt.
+    let inner = area_width.saturating_sub(4 + PROMPT_WIDTH).max(1) as usize;
     layout_input(input, 0, inner).0.len()
 }
 
@@ -110,11 +114,6 @@ fn welcome_card(app: &App) -> Vec<Line<'static>> {
         out.push(Line::from(spans));
     }
     out.push(Line::styled(format!("╰{}╯", "─".repeat(inner)), border));
-    out.push(Line::raw(""));
-    out.push(Line::styled(
-        "  / for commands · Shift+Tab: ask → plan → build · Ctrl-C twice to quit",
-        dim,
-    ));
     out
 }
 
@@ -269,14 +268,36 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
             Item::ToolResult { ok, preview, .. } => {
                 push_tool_result_lines(&mut lines, *ok, preview, false, dim);
             }
-            Item::Info(text) => lines.push(Line::styled(
-                format!("  {text}"),
-                Style::new().fg(Color::Yellow),
-            )),
-            Item::Error(text) => lines.push(Line::styled(
-                format!("  ✗ {text}"),
-                Style::new().bold().fg(Color::Red),
-            )),
+            Item::Command(text) => {
+                lines.push(Line::raw(""));
+                lines.push(Line::from(vec![
+                    Span::styled("› ", Style::new().fg(Color::Cyan)),
+                    Span::styled(text.clone(), Style::new().bold()),
+                ]));
+            }
+            Item::Info(text) => {
+                // A slash command's output nests under it, as Claude Code shows tool output.
+                let run_start = items[..i]
+                    .iter()
+                    .rposition(|it| !matches!(it, Item::Info(_)));
+                let under_command = run_start.is_some_and(|s| matches!(items[s], Item::Command(_)));
+                let (prefix, style) = match (under_command, run_start == i.checked_sub(1)) {
+                    (true, true) => ("  ⎿  ", Style::new()),
+                    (true, false) => ("     ", Style::new()),
+                    _ => ("  · ", Style::new().fg(Color::Gray)),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, dim),
+                    Span::styled(text.clone(), style),
+                ]));
+            }
+            Item::Error(text) => {
+                let under_command = i > 0 && matches!(items[i - 1], Item::Command(_));
+                lines.push(Line::styled(
+                    format!("{}{text}", if under_command { "  ⎿  " } else { "  ✗ " }),
+                    Style::new().fg(Color::Red),
+                ));
+            }
             Item::Note(text) => lines.push(Line::styled(format!("  {text}"), dim)),
         }
         i += 1;
@@ -417,39 +438,49 @@ fn draw_suggestions(frame: &mut Frame, body: Rect, app: &App) {
 
 fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     let busy = app.is_working();
-    let title = if busy {
-        " working… "
-    } else {
-        " message · /help "
-    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(if busy { Color::DarkGray } else { Color::Cyan }))
-        .title(title);
-    let inner_width = area.width.saturating_sub(2).max(1) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let (display_lines, (cursor_display_line, cursor_display_col)) =
-        layout_input(&app.input, app.cursor, inner_width);
-
-    let scroll_line = cursor_display_line.saturating_sub(inner_height.saturating_sub(1));
-    let visible: Vec<Line> = display_lines
-        .iter()
-        .skip(scroll_line)
-        .take(inner_height)
-        .map(|s| Line::raw(s.as_str()))
-        .collect();
-
-    frame.render_widget(
-        Paragraph::new(visible)
-            .wrap(Wrap { trim: false })
-            .block(block),
-        area,
-    );
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let text_width = inner.width.saturating_sub(PROMPT_WIDTH).max(1) as usize;
+    let inner_height = inner.height as usize;
+    let (display_lines, (cursor_line, cursor_col)) =
+        layout_input(&app.input, app.cursor, text_width);
+    let scroll_line = cursor_line.saturating_sub(inner_height.saturating_sub(1));
+    let prompt = Style::new()
+        .fg(if busy { Color::DarkGray } else { Color::Cyan })
+        .bold();
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let visible: Vec<Line> = if app.input.is_empty() {
+        let hint = if busy {
+            "Type to steer the run · Esc takes back the last message"
+        } else {
+            "Ask anything · / for commands · Shift+Tab switches profile"
+        };
+        vec![Line::from(vec![
+            Span::styled("› ", prompt),
+            Span::styled(hint, dim),
+        ])]
+    } else {
+        display_lines
+            .iter()
+            .enumerate()
+            .skip(scroll_line)
+            .take(inner_height)
+            .map(|(i, s)| {
+                let lead = if i == 0 { "› " } else { "  " };
+                Line::from(vec![Span::styled(lead, prompt), Span::raw(s.clone())])
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(visible), inner);
     if app.modal.is_none() {
-        let on_screen_line = cursor_display_line.saturating_sub(scroll_line);
-        let x = (cursor_display_col as u16).min(area.width.saturating_sub(2));
-        let y = area.y + 1 + on_screen_line as u16;
-        frame.set_cursor_position(Position::new(area.x + 1 + x, y));
+        let y = inner.y + cursor_line.saturating_sub(scroll_line) as u16;
+        let x = (cursor_col as u16 + PROMPT_WIDTH).min(inner.width.saturating_sub(1));
+        frame.set_cursor_position(Position::new(inner.x + x, y));
     }
 }
 
@@ -1167,7 +1198,10 @@ mod tests {
         let info = footer_row(&screen);
         assert!(info.contains(" build "), "{screen}");
         assert!(info.contains("nim · model-x"), "{screen}");
-        assert!(screen.contains("message · /help"), "{screen}");
+        assert!(
+            screen.contains("› Ask anything · / for commands"),
+            "{screen}"
+        );
         assert!(
             !screen.contains("Ctrl-C to cancel"),
             "no status row while idle"
@@ -1384,7 +1418,7 @@ mod tests {
         app.input = "abcdefgh".into();
         app.cursor = 8;
         assert_eq!(layout_input(&app.input, app.cursor, 8).1, (0, 7));
-        assert!(render(&mut app, 10, 10).contains("abcdefgh"));
+        assert!(render(&mut app, 14, 10).contains("› abcdefgh"));
     }
 
     #[test]
@@ -1424,7 +1458,8 @@ mod tests {
         assert_eq!(pos, (1, 3));
         let (_, mid) = layout_input("日本語x", 1, 4);
         assert_eq!(mid, (0, 2));
-        assert_eq!(wrapped_input_line_count("日本語x", 6), 2);
+        // Border, padding and the `› ` prompt take six of the ten columns.
+        assert_eq!(wrapped_input_line_count("日本語x", 10), 2);
     }
 
     #[test]
@@ -1558,5 +1593,21 @@ mod tests {
         app.statusline.retain(|s| s != "branch");
         let info = footer_row(&render(&mut app, 120, 12)).to_string();
         assert!(!info.contains("feat/tui"), "{info}");
+    }
+
+    #[test]
+    fn slash_command_output_nests_under_the_command() {
+        let mut app = App::new(Profile::Build, "p".into(), None);
+        app.items.clear();
+        app.items.push(Item::Command("/connections".into()));
+        app.items.push(Item::Info("● nim  stored  · active".into()));
+        app.items.push(Item::Info("○ gemini  stored".into()));
+        app.items.push(Item::Info("edit approved".into()));
+        app.items.insert(3, Item::Note("x".into()));
+        let screen = render(&mut app, 60, 12);
+        assert!(screen.contains("› /connections"), "{screen}");
+        assert!(screen.contains("  ⎿  ● nim  stored  · active"), "{screen}");
+        assert!(screen.contains("     ○ gemini  stored"), "{screen}");
+        assert!(screen.contains("  · edit approved"), "{screen}");
     }
 }
