@@ -19,6 +19,24 @@ pub enum ExitReason {
     RateLimited,
     NoProgress,
     Cancelled,
+    SystemPromptBudgetExceeded,
+    ToolContextBudgetExceeded,
+    TaskTokenCapReached,
+}
+
+impl ExitReason {
+    pub fn budget_message(self) -> Option<&'static str> {
+        match self {
+            Self::SystemPromptBudgetExceeded => {
+                Some("system prompt exceeds the 2,500-token budget")
+            }
+            Self::ToolContextBudgetExceeded => {
+                Some("file and search context exceeds the 6,000-token budget")
+            }
+            Self::TaskTokenCapReached => Some("task token cap reached"),
+            _ => None,
+        }
+    }
 }
 
 /// Live progress notifications for a UI. Never carries file contents beyond a short preview.
@@ -133,7 +151,8 @@ pub struct LoopLimits {
     pub history: Vec<Message>,
     pub steer: Option<SteerInbox>,
     /// Captures calls even if the run exits with an error.
-    pub token_ledger: Option<std::sync::Arc<std::sync::Mutex<Vec<LedgerEntry>>>>,
+    pub token_ledger: Option<Arc<Mutex<Vec<LedgerEntry>>>>,
+    pub calibration: crate::agent::token_ledger::Calibration,
 }
 
 impl LoopLimits {
@@ -178,6 +197,7 @@ impl Default for LoopLimits {
             history: Vec::new(),
             steer: None,
             token_ledger: None,
+            calibration: Default::default(),
         }
     }
 }
@@ -251,6 +271,12 @@ fn run_loop(
     let mut last_tool_fingerprint: Option<(String, String, String)> = None;
     let mut identical_tool_streak = 0usize;
 
+    let provider = context.and_then(|(_, config)| config.provider.as_ref());
+    let provider_key = provider.map(crate::agent::token_ledger::provider_key);
+    let model_id = provider.map(|provider| provider.model.clone());
+    let cap = context.and_then(|(_, config)| config.task_token_cap);
+    let mut spent = 0u64;
+    let mut calibration = limits.calibration.clone();
     let mut messages = limits.history.clone();
     messages.push(Message::user(initial_user_message));
     // The tool log spans the whole session; this run's summary counts only its own entries.
@@ -302,10 +328,22 @@ fn run_loop(
         };
 
         let estimated = InputEstimate::for_request(&req);
+        if calibration.conservative(estimated.system_prompt) > 2_500 {
+            break ExitReason::SystemPromptBudgetExceeded;
+        }
+        if calibration.conservative(estimated.file_reads) > 6_000 {
+            break ExitReason::ToolContextBudgetExceeded;
+        }
         let step_start = Instant::now();
         limits.emit(ProgressEvent::Thinking { step: steps + 1 });
         let mut network_retries = 0;
         let completion = loop {
+            let calibrated_input = calibration.predict(estimated.total());
+            if cap.is_some_and(|cap| {
+                spent >= cap || calibration.conservative(estimated.total()) > cap - spent
+            }) {
+                break 'agent ExitReason::TaskTokenCapReached;
+            }
             let attempt = if limits.stream && limits.progress.is_some() {
                 let mut buffer = String::new();
                 let mut reasoning_buffer = String::new();
@@ -347,9 +385,16 @@ fn run_loop(
             if let Some(input) = reported.input_tokens {
                 last_input_tokens = input;
             }
+            spent = spent
+                .saturating_add(reported.input_tokens.unwrap_or(calibrated_input))
+                .saturating_add(reported.output_tokens.unwrap_or_default());
+            calibration.observe(estimated.total(), reported.input_tokens);
             let mut row = LedgerEntry {
                 reported,
                 estimated: estimated.clone(),
+                provider: provider_key.clone(),
+                model: model_id.clone(),
+                calibrated_input: Some(calibrated_input),
                 completed: attempt.is_ok(),
                 tool_log_order: None,
                 events: Vec::new(),
@@ -434,6 +479,13 @@ fn run_loop(
             limits.emit(ProgressEvent::Assistant {
                 text: text.to_string(),
             });
+        }
+
+        if cap.is_some_and(|cap| spent > cap || (spent == cap && !response.tool_calls.is_empty())) {
+            if let Some(text) = response.text {
+                messages.push(Message::assistant(text, Vec::new()));
+            }
+            break ExitReason::TaskTokenCapReached;
         }
 
         if response.tool_calls.is_empty() {

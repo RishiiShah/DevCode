@@ -944,9 +944,14 @@ impl App {
                 "rate limited after {} steps; try again shortly",
                 result.steps
             ))),
-            other => self
-                .items
-                .push(Item::Error(format!("stopped early: {other:?}"))),
+            other => {
+                let reason = other
+                    .budget_message()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{other:?}"));
+                self.items
+                    .push(Item::Error(format!("stopped early: {reason}")));
+            }
         }
     }
 

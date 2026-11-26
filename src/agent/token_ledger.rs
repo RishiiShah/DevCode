@@ -13,6 +13,14 @@ pub struct InputEstimate {
 }
 
 impl InputEstimate {
+    pub(crate) fn total(&self) -> u64 {
+        self.system_prompt
+            .saturating_add(self.tool_schemas)
+            .saturating_add(self.history)
+            .saturating_add(self.file_reads)
+            .saturating_add(self.command_output)
+    }
+
     pub(crate) fn for_request(request: &Request) -> Self {
         let estimate = |bytes: usize| bytes.div_ceil(4) as u64;
         let mut result = Self {
@@ -56,6 +64,12 @@ pub struct LedgerEntry {
     pub reported: Usage,
     /// Request component estimates in tokens, using UTF-8 bytes divided by four.
     pub estimated: InputEstimate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibrated_input: Option<u64>,
     pub completed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_log_order: Option<usize>,
@@ -97,8 +111,24 @@ pub fn summary(entries: &[LedgerEntry]) -> Option<String> {
             .map(|entry| field(&entry.estimated))
             .sum::<u64>()
     };
+    let (sampled, divergence) =
+        entries.iter().fold((0, 0i128), |(count, sum), entry| {
+            match entry.reported.input_tokens.zip(entry.calibrated_input) {
+                Some((actual, predicted)) => {
+                    (count + 1, sum + i128::from(actual) - i128::from(predicted))
+                }
+                None => (count, sum),
+            }
+        });
+    let calibration = if sampled > 0 {
+        format!(
+            " · reported input minus calibrated estimate: {divergence:+} across {sampled} calls"
+        )
+    } else {
+        String::new()
+    };
     Some(format!(
-        "reported: {} input, {} output, {} uncached, {} cache read, {} cache write, {} reasoning · estimated input: {} system, {} schemas, {} history, {} file reads, {} command output",
+        "reported: {} input, {} output, {} uncached, {} cache read, {} cache write, {} reasoning · estimated input: {} system, {} schemas, {} history, {} file reads, {} command output{calibration}",
         total(|u| u.input_tokens),
         total(|u| u.output_tokens),
         total(|u| u.uncached_input_tokens),
@@ -111,4 +141,62 @@ pub fn summary(entries: &[LedgerEntry]) -> Option<String> {
         estimate(|i| i.file_reads),
         estimate(|i| i.command_output),
     ))
+}
+
+/// A stable provider identifier for calibration. Custom URLs are hashed so URL credentials
+/// or private hosts do not appear in the saved ledger.
+pub(crate) fn provider_key(provider: &crate::config::ProviderConfig) -> String {
+    use sha2::{Digest, Sha256};
+    if let Some(connector) = &provider.connector {
+        return connector.clone();
+    }
+    let endpoint = provider.base_url.trim_end_matches('/');
+    let digest = format!("{:x}", Sha256::digest(endpoint.as_bytes()));
+    format!("{}:{}", provider.kind.as_str(), &digest[..16])
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Calibration {
+    estimated: u128,
+    reported: u128,
+}
+
+impl Calibration {
+    pub(crate) fn observe(&mut self, estimated: u64, reported: Option<u64>) {
+        if let Some(reported) = reported.filter(|&count| count > 0 && estimated > 0) {
+            self.estimated = self.estimated.saturating_add(u128::from(estimated));
+            self.reported = self.reported.saturating_add(u128::from(reported));
+        }
+    }
+
+    pub(crate) fn predict(&self, estimate: u64) -> u64 {
+        if self.estimated == 0 {
+            return estimate;
+        }
+        u128::from(estimate)
+            .saturating_mul(self.reported)
+            .div_ceil(self.estimated)
+            .min(u128::from(u64::MAX)) as u64
+    }
+
+    pub(crate) fn conservative(&self, estimate: u64) -> u64 {
+        self.predict(estimate).max(estimate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Calibration;
+
+    #[test]
+    fn calibration_uses_reported_samples_and_preserves_the_safety_floor() {
+        let mut calibration = Calibration::default();
+        assert_eq!(calibration.predict(100), 100);
+        calibration.observe(100, None);
+        calibration.observe(100, Some(160));
+        assert_eq!(calibration.predict(100), 160);
+        calibration.observe(100, Some(20));
+        assert_eq!(calibration.predict(100), 90);
+        assert_eq!(calibration.conservative(100), 100);
+    }
 }

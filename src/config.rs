@@ -127,6 +127,8 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub provider: Option<ProviderConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_token_cap: Option<u64>,
     /// Overrides keyed by connector (or custom endpoint URL), then exact model ID.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_capabilities: std::collections::BTreeMap<

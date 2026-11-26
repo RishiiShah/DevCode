@@ -36,7 +36,7 @@ Handoff rules: one item per commit (`<type>: <what>`); stage named files only; n
 Goal (PRD §1.0, FR-7): best-practice enforcement, fewer tokens, transparent token reporting, on any user-connected model.
 0. **Capability record** (FR-7.7, ARCH §7.5) Source precedence, status, and streaming-usage downgrade landed. Native-tool and schema fallback tracked below.
 1. **Token ledger** (FR-7.1, FR-7.2, ARCH §7.5) Provider normalization, persistence, attribution, and status landed. Recorded fixtures and legacy-load checks in `tests/m20_anthropic.rs`, `tests/m10a_provider.rs`, `tests/m25_code_assist.rs`, and `tests/m28_resume.rs`.
-2. **Enforce budgets** (FR-7.3) NFR-3/NFR-4 tests; per-provider estimate calibration; optional task cap.
+2. **Enforce budgets** (FR-7.3, ARCH §7.5) NFR-3/NFR-4 pre-send limits, per-provider calibration, and optional task cap landed (`tests/m9_discipline.rs`).
 3. **Prompt caching** (FR-7.4) Stable prefix; per-adapter cache markers; hit-rate reporting.
 4. **Tool-call fallback and egress** (FR-7.7, FR-7.6) Text tool protocol, schema downgrade, outbound preview, and private-path enforcement.
 5. **Harness evidence** (FR-7.5, RES-015) Paired-task pilot across 2–3 providers plus fault fixtures. Measure pass rate, tokens, gate and rollback interventions before claiming peer superiority.

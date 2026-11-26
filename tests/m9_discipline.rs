@@ -437,3 +437,87 @@ fn compaction_pins_the_current_request_not_the_first_question() {
     );
     assert!(compacted[1].content.contains("- what is this repo?"));
 }
+
+#[test]
+fn refuses_oversized_system_prompt_before_model_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.verification.test_command = Some("x".repeat(10_001));
+    let result = devcode::agent::run_agent_with_config(
+        Profile::Build,
+        &ScriptedModel::new(vec![]),
+        &ToolRegistry::new(),
+        "build",
+        &LoopLimits::default(),
+        dir.path(),
+        &config,
+    )
+    .unwrap();
+    assert_eq!(result.exit_reason, ExitReason::SystemPromptBudgetExceeded);
+    assert!(result.token_ledger.is_empty());
+}
+
+#[test]
+fn refuses_oversized_file_context_before_model_call() {
+    let limits = LoopLimits {
+        history: vec![
+            Message::assistant(
+                "",
+                vec![ToolCall {
+                    id: "read-1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                    thought_signature: None,
+                }],
+            ),
+            Message::tool("x".repeat(24_001), "read-1"),
+        ],
+        ..Default::default()
+    };
+    let result = run_agent_loop(
+        Profile::Ask,
+        &ScriptedModel::new(vec![]),
+        &ToolRegistry::new(),
+        "explain",
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(result.exit_reason, ExitReason::ToolContextBudgetExceeded);
+    assert!(result.token_ledger.is_empty());
+}
+
+#[test]
+fn task_token_cap_checks_spend_and_stops_before_another_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "task_token_cap": 1000
+    }))
+    .unwrap();
+    let model = ScriptedModel::new(vec![Ok(Response {
+        text: Some("would continue".into()),
+        tool_calls: vec![ToolCall {
+            id: "tool-1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            thought_signature: None,
+        }],
+        usage: Usage {
+            input_tokens: Some(1000),
+            output_tokens: Some(10),
+            ..Usage::default()
+        },
+    })]);
+    let result = devcode::agent::run_agent_with_config(
+        Profile::Ask,
+        &model,
+        &ToolRegistry::new(),
+        "explain",
+        &LoopLimits::default(),
+        dir.path(),
+        &config,
+    )
+    .unwrap();
+    assert_eq!(result.exit_reason, ExitReason::TaskTokenCapReached);
+    assert_eq!(result.token_ledger.len(), 1);
+    assert_eq!(result.total_input_tokens, 1000);
+}

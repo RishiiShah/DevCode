@@ -196,6 +196,17 @@ impl Session {
             self.model
                 .set_stream_usage(record.values.streaming_usage != Some(false));
         }
+        let mut calibration = agent::token_ledger::Calibration::default();
+        if let Some(provider) = &self.config.provider {
+            let key = agent::token_ledger::provider_key(provider);
+            for row in self
+                .token_ledger
+                .iter()
+                .filter(|row| row.provider.as_deref() == Some(&key))
+            {
+                calibration.observe(row.estimated.total(), row.reported.input_tokens);
+            }
+        }
         let token_ledger = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let limits = agent::LoopLimits {
             history: self.history.clone(),
@@ -209,6 +220,7 @@ impl Session {
             cancel: Some(self.cancel.clone()),
             steer: Some(self.steer.clone()),
             token_ledger: Some(token_ledger.clone()),
+            calibration,
             ..Default::default()
         };
         let result = agent::run_agent_with_config(

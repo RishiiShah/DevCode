@@ -163,6 +163,9 @@ fn print_result(result: &LoopResult) {
     if let Some((path, count)) = &result.no_progress {
         eprintln!("no progress: {} repeated {} times", path, count);
     }
+    if let Some(reason) = result.exit_reason.budget_message() {
+        eprintln!("stopped: {reason}");
+    }
     if result.exit_reason == ExitReason::RateLimited {
         eprintln!("rate limited after {} steps", result.steps);
     }
@@ -216,7 +219,12 @@ fn main() {
                 report.pruned_manifests, report.pruned_blobs
             );
         }
-        Ok(RunOutput::Prompt(result)) => print_result(&result),
+        Ok(RunOutput::Prompt(result)) => {
+            print_result(&result);
+            if result.exit_reason.budget_message().is_some() {
+                std::process::exit(1);
+            }
+        }
         Ok(RunOutput::Repl(mut session)) => {
             if let Some(notice) = session.legacy_state_notice() {
                 println!("{notice}");
