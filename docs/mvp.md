@@ -145,10 +145,10 @@ Deliver (`src/agent/`):
                     "model": "<model id from the provider's catalog>",
                     "context_window": 128000 } }
     ```
-    `kind` accepts only `openai_compat` in the MVP; any other value is an error that lists supported kinds. `--provider nim` is a preset filling `base_url` and `api_key_env`. `model` and `context_window` have no default (catalogs and limits change; tool-calling support is per model). `api_key_env` names an environment variable; the key is never stored in config. `api_key_env` may be empty for a local endpoint that needs no key.
+    `kind` accepts `openai_compat` and `anthropic` (native Messages API, preset `anthropic`); any other value is an error that lists supported kinds. `--provider nim` is a preset filling `base_url` and `api_key_env`. `model` and `context_window` have no default (catalogs and limits change; tool-calling support is per model). `api_key_env` names an environment variable; the key is never stored in config. `api_key_env` may be empty for a local endpoint that needs no key.
   - Tests: valid block; unsupported `kind` error lists `openai_compat`; `--provider nim` fills `base_url` and `api_key_env`; a key value placed in config is rejected (only an env var name is accepted); unknown field inside `provider` is an error.
 - **OpenAI-compatible adapter** (`src/agent/openai_compat.rs`, `ureq`):
-  - Request: `POST {base_url}/chat/completions` with `Authorization: Bearer <key>` (omitted when `api_key_env` is empty), JSON body `{ model, messages, tools, tool_choice: "auto", stream: false }`; tools use the `{"type":"function","function":{name,description,parameters}}` shape.
+  - Request: `POST {base_url}/chat/completions` with `Authorization: Bearer <key>` (omitted when `api_key_env` is empty), JSON body `{ model, messages, tools, tool_choice: "auto", stream: false }` (`complete`). When a progress sink is set (TUI) and `DEVCODE_STREAM` is not `0`/`false`/`off`/`no`, `complete_stream` sends `stream: true` with `stream_options.include_usage` and parses SSE deltas; non-SSE replies and HTTP 400 fall back to `complete`; tools use the `{"type":"function","function":{name,description,parameters}}` shape.
   - Response: `choices[0].message.content` and `tool_calls[].function.{name, arguments}` (`arguments` is a JSON **string**; parse it); `usage.prompt_tokens` and `usage.completion_tokens` map to input and output tokens; read `finish_reason`.
   - Failures: 429 and 5xx retry with exponential backoff (honor `Retry-After`; at most 5 tries for 429, 2 for 5xx); other 4xx fail at once with the body's error message; connect timeout 10 s, read timeout 120 s. Invalid `arguments` JSON, an unknown tool name, or a response with neither text nor tool calls counts as a format error (3 in a row ends the run). A model that never returns tool calls produces a clear message that it may lack tool-calling support.
   - Key handling: read the env var named by `api_key_env` at startup; never read `.env` files; never log or print the key; redact it from error text. M2's `strip_env` keeps it out of child processes.
@@ -249,7 +249,7 @@ Acceptance (tests set `DEVCODE_CONFIG_DIR` to a temp dir; never touch the real h
 - The key string appears in no stdout, stderr, trace line or error text across login, list, a scripted run and a failing provider call (401 whose body echoes the key).
 - `run_command` with `cat` on the credentials path is denied by the lexical guard.
 - Key passed as an argument is rejected.
-Non-goals: OAuth or browser login (providers named so far use API keys; account-based login is provider-specific and unverified), OS keyring backend, multiple profiles per connector, Windows ACLs, encryption at rest.
+Non-goals at M12 (superseded in part, all still partial vs peers; see `TODO.md` P10): OAuth (now Gemini paste-code only, `oauth-gemini.json`), OS keyring (now opt-in `DEVCODE_CREDENTIALS_STORE=auto`), multiple credentials per connector (now named slots `nim:alias` + `auth switch`). Still non-goals: Windows ACLs, encryption at rest.
 
 ### M13. Safer login input and `/connect`
 Spec: new. Problem found live: a key pasted together with the command was echoed by the terminal before the hidden prompt started.

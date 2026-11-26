@@ -389,6 +389,6 @@ P6/P7 (scripted dogfood + harder Gemini build) = **evidence**, not peer-done che
 
 ### Next work order (peer bar first)
 
-1. P10a–P10d (accounts to OpenCode/Codex level) **or** U2a (real streaming) — pick one track
+1. U2a remainder (Ctrl-C cancel of an in-flight stream, reasoning deltas) **or** finish P10a–P10d to OpenCode/Codex level (OAuth refresh/wiring, keyring default, Anthropic OAuth/betas)
 2. Sandbox toward Codex (bwrap/Seatbelt) when accounts/stream track is peer-grade
 3. A4 signing when install path is real

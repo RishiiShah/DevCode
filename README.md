@@ -31,7 +31,7 @@ Empirical research notes supporting these normative standards are maintained und
 
 ## Quickstart (MVP, macOS and Linux)
 
-Status: working MVP. Live-tested with NVIDIA NIM (RES-012) and Gemini (RES-013) on macOS. Presets: `nim`, `gemini`, `openai`, `anthropic` (native Messages API; still short of OpenCode OAuth/stream parity), `openrouter`. `debug` and `security` profiles are not built; Windows is not supported yet.
+Status: working MVP. Live-tested with NVIDIA NIM (RES-012) and Gemini (RES-013) on macOS. Presets: `nim`, `gemini`, `openai`, `anthropic` (native Messages API), `openrouter`. Account and provider features are partial against the peer bar (see `TODO.md`): stored keys, named slots with `devcode auth switch`, opt-in OS keyring, Gemini paste-code OAuth, SSE streaming in the TUI. `debug` and `security` profiles are not built; Windows is not supported yet.
 
 ```sh
 cargo build --release          # binary: target/release/devcode
@@ -58,9 +58,23 @@ devcode --profile build "fix the bug in calc.py"         # edits with approval, 
 devcode rollback                                         # undo the whole latest run
 ```
 
-Run `devcode` with no prompt in a terminal to open the full-screen interface: live transcript, diff approvals in a modal, masked key entry, and slash commands (`/help`, `/init <preset>`, `/connect`, `/connections` (stored|env|missing), `/provider`, `/model` (catalog auto-fetches on connect/provider switch; filterable), `/effort` (Gemini), `/ask`, `/plan`, `/build`, `/rollback`). `--plain` keeps the line-based REPL. With no `verification.test_command` configured, build runs finish marked UNVERIFIED instead of looping.
+Run `devcode` with no prompt in a terminal to open the full-screen interface: live transcript, diff approvals in a modal, masked key entry, and slash commands (`/help`, `/init <preset>`, `/connect`, `/connections` (stored|env|missing), `/provider`, `/model` (catalog auto-fetches on connect/provider switch; filterable), `/effort` (Gemini), `/ask`, `/plan`, `/build`, `/rollback`). `--plain` keeps the line-based REPL (no streaming). The TUI streams assistant text as it arrives (OpenAI-compatible and Anthropic SSE); set `DEVCODE_STREAM=0` to turn that off. Ctrl-C cannot yet cancel a request mid-stream. With no `verification.test_command` configured, build runs finish marked UNVERIFIED instead of looping.
 
 `--trace` writes per-step timing and token counts (no file contents) to `.devcode/trace.jsonl`. Do not paste input while `devcode` runs: approval prompts read stdin. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
+
+Shell commands stop after 120 seconds. Long-running servers use the `start_process` / `stop_process` tools, which snapshot first, run in their own process group, and reconcile file changes on stop. If a command cannot be reconciled, its error names a retained `.devcode/recovery/<session>/<step>.json` snapshot. Run `devcode recover <session> <step>` to extract original files into `.devcode/recovered/<session>/<step>` without overwriting your working tree. Compare before restoring; the snapshot does not distinguish command changes from concurrent user changes or capture newly created paths.
+
+### Accounts and keys
+
+```sh
+devcode auth login nim            # hidden prompt; or --with-stdin
+devcode auth login nim:work       # named slot (one colon, alias [A-Za-z0-9_-]+)
+devcode auth switch nim:work      # select the stored key; beats the env var for that connector
+devcode auth login gemini --oauth # Google paste-code login -> oauth-gemini.json (not used by requests yet)
+devcode auth list | logout NAME
+```
+
+Key order: an explicit `auth switch` / `/connect NAME:alias` wins, then the env var named by `api_key_env`, then the stored default key. Keys live in `credentials.json` (0600, outside the workspace). `DEVCODE_CREDENTIALS_STORE=auto` tries the OS keyring first and falls back to the file; the default is the file only.
 
 ## Install
 
