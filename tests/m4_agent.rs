@@ -168,6 +168,7 @@ fn test_step_limit_ends_run_with_matching_reason() {
         context_window: None,
         trace: false,
         progress: None,
+        stream: true,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -204,6 +205,7 @@ fn test_wall_time_limit_ends_run_with_matching_reason() {
         context_window: None,
         trace: false,
         progress: None,
+        stream: true,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();
@@ -229,6 +231,7 @@ fn test_consecutive_format_errors_limit_ends_run() {
         context_window: None,
         trace: false,
         progress: None,
+        stream: true,
     };
 
     let result = run_agent_loop(Profile::Build, &model, &tools, "Prompt", &limits).unwrap();

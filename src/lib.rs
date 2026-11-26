@@ -36,6 +36,19 @@ impl std::fmt::Display for DevCodeError {
 }
 impl std::error::Error for DevCodeError {}
 
+/// `DEVCODE_STREAM` gate. `0`, `false`, `off`, and `no` (any case) disable streaming.
+/// Unset and every other value leave it on. Callers pass the variable's value;
+/// this does not read the process environment.
+pub fn stream_enabled(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    !matches!(
+        value.to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
 pub struct Session {
     pub profile: Profile,
     config: Config,
@@ -68,6 +81,7 @@ impl Session {
             context_window: self.config.provider.as_ref().map(|p| p.context_window),
             trace: self.trace,
             progress: self.progress.clone(),
+            stream: stream_enabled(std::env::var("DEVCODE_STREAM").ok().as_deref()),
             ..Default::default()
         };
         agent::run_agent_with_config(
@@ -602,5 +616,31 @@ fn build_model(provider: config::ProviderConfig) -> Result<Box<dyn agent::Model>
         )))
     } else {
         Ok(model)
+    }
+}
+
+#[cfg(test)]
+mod stream_enabled_tests {
+    use super::stream_enabled;
+
+    #[test]
+    fn unset_and_other_values_enable_streaming() {
+        assert!(stream_enabled(None));
+        assert!(stream_enabled(Some("")));
+        assert!(stream_enabled(Some("1")));
+        assert!(stream_enabled(Some("true")));
+        assert!(stream_enabled(Some("yes")));
+        assert!(stream_enabled(Some("on")));
+        assert!(stream_enabled(Some("false ")));
+        assert!(stream_enabled(Some(" off")));
+    }
+
+    #[test]
+    fn off_switches_are_case_insensitive() {
+        for value in [
+            "0", "false", "FALSE", "False", "off", "OFF", "no", "No", "nO",
+        ] {
+            assert!(!stream_enabled(Some(value)), "{value}");
+        }
     }
 }

@@ -106,6 +106,8 @@ pub struct App {
     history_pos: Option<usize>,
     pending_prompt: String,
     quit_armed: bool,
+    /// A new model call started; its assistant text must not merge into an earlier partial bubble.
+    fresh_bubble: bool,
     pub tick: usize,
     /// Index in `items` of an `Item::Tool` row shown expanded; `None` = all tool cards collapsed.
     pub expanded_tool: Option<usize>,
@@ -154,6 +156,7 @@ impl App {
             history_pos: None,
             pending_prompt: String::new(),
             quit_armed: false,
+            fresh_bubble: false,
             tick: 0,
             expanded_tool: None,
             models: Vec::new(),
@@ -275,7 +278,8 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if let Some(Item::Assistant(last)) = self.items.last_mut() {
+        let fresh = std::mem::take(&mut self.fresh_bubble);
+        if let (false, Some(Item::Assistant(last))) = (fresh, self.items.last_mut()) {
             if text == *last {
                 return;
             }
@@ -291,7 +295,10 @@ impl App {
 
     fn on_progress(&mut self, p: ProgressEvent) {
         match p {
-            ProgressEvent::Thinking { step } => self.status = Status::Working { step },
+            ProgressEvent::Thinking { step } => {
+                self.status = Status::Working { step };
+                self.fresh_bubble = true;
+            }
             ProgressEvent::Assistant { text } => self.merge_assistant_progress(text),
             ProgressEvent::ToolCall { name, summary } => {
                 self.items.push(Item::Tool { name, summary })
@@ -1744,6 +1751,28 @@ mod tests {
             text: "hello".into(),
         }));
         assert_eq!(assistant_bubble_texts(&a.items), vec!["hello"]);
+    }
+
+    #[test]
+    fn retry_after_partial_stream_starts_a_new_bubble() {
+        use crate::agent::ProgressEvent;
+        let mut a = app();
+        a.on_event(Ev::Progress(ProgressEvent::Thinking { step: 1 }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "Checking the file.".into(),
+        }));
+        // Format error: the loop retries with a new model call.
+        a.on_event(Ev::Progress(ProgressEvent::Thinking { step: 1 }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "Try".into(),
+        }));
+        a.on_event(Ev::Progress(ProgressEvent::Assistant {
+            text: "Try again".into(),
+        }));
+        assert_eq!(
+            assistant_bubble_texts(&a.items),
+            vec!["Checking the file.", "Try again"]
+        );
     }
 
     #[test]

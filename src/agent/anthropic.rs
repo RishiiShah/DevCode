@@ -1,6 +1,9 @@
 use super::model::{Message, Model, ModelError, Request, Response, Role, ToolCall, Usage};
+use super::sse::{RedactTail, SseParser};
 use crate::config::ProviderConfig;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::io::Read;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -18,6 +21,63 @@ fn api_root(base_url: &str) -> String {
     } else {
         format!("{trimmed}/v1")
     }
+}
+
+struct ToolSlot {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+struct StreamState {
+    tail: RedactTail,
+    text: String,
+    tools: BTreeMap<u64, ToolSlot>,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+impl StreamState {
+    fn new(key: &str) -> Self {
+        Self {
+            tail: RedactTail::new(key),
+            text: String::new(),
+            tools: BTreeMap::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+        }
+    }
+}
+
+/// `Ok(true)` means sleep already happened and the caller should resend.
+/// `Err(RateLimited)` matches `complete_inner` after the 429 cap.
+fn retry_pause(
+    code: u16,
+    retry_after: Option<u64>,
+    rate_attempts: &mut u32,
+    server_attempts: &mut u32,
+    retries: bool,
+) -> Result<bool, ModelError> {
+    let count = if code == 429 {
+        *rate_attempts += 1;
+        *rate_attempts
+    } else if code >= 500 {
+        *server_attempts += 1;
+        *server_attempts
+    } else {
+        0
+    };
+    let limit = if code == 429 { 5 } else { 2 };
+    if retries && count > 0 && count <= limit {
+        std::thread::sleep(Duration::from_secs(
+            retry_after.unwrap_or(1u64 << (count - 1)),
+        ));
+        return Ok(true);
+    }
+    if code == 429 && retries {
+        return Err(ModelError::RateLimited);
+    }
+    Ok(false)
 }
 
 impl Anthropic {
@@ -101,6 +161,21 @@ impl Anthropic {
         } else {
             text.replace(&self.key, "[REDACTED]")
         }
+    }
+
+    fn pace(&self) -> Result<(), ModelError> {
+        if let Some(rpm) = self.config.max_rpm {
+            let mut last = self
+                .last_request
+                .lock()
+                .map_err(|e| ModelError::Other(e.to_string()))?;
+            let interval = Duration::from_secs_f64(60.0 / f64::from(rpm));
+            if let Some(previous) = *last {
+                std::thread::sleep(interval.saturating_sub(previous.elapsed()));
+            }
+            *last = Some(Instant::now());
+        }
+        Ok(())
     }
 
     fn anthropic_messages(messages: &[Message]) -> Result<Vec<Value>, ModelError> {
@@ -282,20 +357,10 @@ impl Anthropic {
     ) -> Result<Response, ModelError> {
         let body = self.request_body(req, max_tokens)?;
         let url = format!("{}/messages", api_root(&self.config.base_url));
-        let mut rate_attempts = 0;
-        let mut server_attempts = 0;
+        let mut rate_attempts = 0u32;
+        let mut server_attempts = 0u32;
         loop {
-            if let Some(rpm) = self.config.max_rpm {
-                let mut last = self
-                    .last_request
-                    .lock()
-                    .map_err(|e| ModelError::Other(e.to_string()))?;
-                let interval = Duration::from_secs_f64(60.0 / f64::from(rpm));
-                if let Some(previous) = *last {
-                    std::thread::sleep(interval.saturating_sub(previous.elapsed()));
-                }
-                *last = Some(Instant::now());
-            }
+            self.pace()?;
             let call = self.apply_headers(self.client.post(&url));
             match call.send_json(body.clone()) {
                 Ok(response) => {
@@ -308,34 +373,278 @@ impl Anthropic {
                     let retry_after = response
                         .header("Retry-After")
                         .and_then(|s| s.parse::<u64>().ok());
-                    let count = if code == 429 {
-                        rate_attempts += 1;
-                        rate_attempts
-                    } else if code >= 500 {
-                        server_attempts += 1;
-                        server_attempts
-                    } else {
-                        0
-                    };
-                    let limit = if code == 429 { 5 } else { 2 };
-                    if retries && count > 0 && count <= limit {
-                        std::thread::sleep(Duration::from_secs(
-                            retry_after.unwrap_or(1u64 << (count - 1)),
-                        ));
+                    if retry_pause(
+                        code,
+                        retry_after,
+                        &mut rate_attempts,
+                        &mut server_attempts,
+                        retries,
+                    )? {
                         continue;
                     }
-                    if code == 429 && retries {
-                        return Err(ModelError::RateLimited);
-                    }
-                    let body = response.into_string().unwrap_or_default();
+                    let err_body = response.into_string().unwrap_or_default();
                     return Err(ModelError::Network(
-                        self.redact(&format!("HTTP {code}: {body}")),
+                        self.redact(&format!("HTTP {code}: {err_body}")),
                     ));
                 }
                 Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
             }
         }
     }
+
+    fn complete_stream_inner(
+        &self,
+        req: &Request,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Response, ModelError> {
+        let mut body = self.request_body(req, None)?;
+        body["stream"] = json!(true);
+        let url = format!("{}/messages", api_root(&self.config.base_url));
+        let mut rate_attempts = 0u32;
+        let mut server_attempts = 0u32;
+        loop {
+            self.pace()?;
+            let call = self.apply_headers(self.client.post(&url));
+            match call.send_json(body.clone()) {
+                Ok(response) => return self.consume_success(response, req, on_delta),
+                // Status is known before any success-body byte. One non-streaming attempt.
+                Err(ureq::Error::Status(400, _)) => return self.complete(req),
+                Err(ureq::Error::Status(code, response)) => {
+                    let retry_after = response
+                        .header("Retry-After")
+                        .and_then(|header| header.parse::<u64>().ok());
+                    if retry_pause(
+                        code,
+                        retry_after,
+                        &mut rate_attempts,
+                        &mut server_attempts,
+                        true,
+                    )? {
+                        continue;
+                    }
+                    let err_body = response.into_string().unwrap_or_default();
+                    return Err(ModelError::Network(
+                        self.redact(&format!("HTTP {code}: {err_body}")),
+                    ));
+                }
+                Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
+            }
+        }
+    }
+
+    fn consume_success(
+        &self,
+        response: ureq::Response,
+        req: &Request,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Response, ModelError> {
+        if response
+            .content_type()
+            .trim()
+            .eq_ignore_ascii_case("text/event-stream")
+        {
+            return self.read_event_stream(response.into_reader(), req, on_delta);
+        }
+        let value: Value = response
+            .into_json()
+            .map_err(|e| ModelError::FormatError(self.redact(&e.to_string())))?;
+        Self::parse_response(&value, req)
+    }
+
+    fn read_event_stream(
+        &self,
+        mut reader: impl Read,
+        req: &Request,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Response, ModelError> {
+        let mut parser = SseParser::new();
+        let mut state = StreamState::new(&self.key);
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| ModelError::Network(self.redact(&e.to_string())))?;
+            let proceed = if n == 0 {
+                parser
+                    .finish(&mut |name, data| self.on_sse_event(name, data, &mut state, on_delta))?
+            } else {
+                parser.push(&buf[..n], &mut |name, data| {
+                    self.on_sse_event(name, data, &mut state, on_delta)
+                })?
+            };
+            if n == 0 || !proceed {
+                break;
+            }
+        }
+        state.tail.finish(on_delta);
+        self.assemble_stream(state, req)
+    }
+
+    fn on_sse_event(
+        &self,
+        name: &str,
+        data: &str,
+        state: &mut StreamState,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<bool, ModelError> {
+        if name == "ping" {
+            return Ok(true);
+        }
+        if name == "error" {
+            return Err(ModelError::Network(
+                self.redact(&format!("stream error: {data}")),
+            ));
+        }
+        let value: Value = serde_json::from_str(data)
+            .map_err(|e| ModelError::FormatError(self.redact(&e.to_string())))?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or(name);
+        match kind {
+            "ping" => Ok(true),
+            "error" => Err(ModelError::Network(
+                self.redact(&format!("stream error: {data}")),
+            )),
+            "message_start" => {
+                if let Some(tokens) = value
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(Value::as_u64)
+                {
+                    state.input_tokens = tokens;
+                }
+                Ok(true)
+            }
+            "content_block_start" => {
+                note_block_start(&value, state)?;
+                Ok(true)
+            }
+            "content_block_delta" => {
+                note_block_delta(&value, state, on_delta)?;
+                Ok(true)
+            }
+            "message_delta" => {
+                if let Some(tokens) = value
+                    .pointer("/usage/output_tokens")
+                    .and_then(Value::as_u64)
+                {
+                    state.output_tokens = tokens;
+                }
+                Ok(true)
+            }
+            "message_stop" => Ok(false),
+            _ => Ok(true),
+        }
+    }
+
+    fn assemble_stream(&self, state: StreamState, req: &Request) -> Result<Response, ModelError> {
+        let mut calls = Vec::new();
+        for (_, slot) in state.tools {
+            let name = slot
+                .name
+                .ok_or_else(|| ModelError::FormatError("missing tool name".into()))?;
+            if !req.tools.iter().any(|tool| tool.name == name) {
+                return Err(ModelError::FormatError("unknown tool name".into()));
+            }
+            let id = slot
+                .id
+                .ok_or_else(|| ModelError::FormatError("missing tool call id".into()))?;
+            let arguments = if slot.arguments.is_empty() {
+                "{}".to_owned()
+            } else {
+                slot.arguments
+            };
+            serde_json::from_str::<Value>(&arguments)
+                .map_err(|e| ModelError::FormatError(self.redact(&e.to_string())))?;
+            calls.push(ToolCall {
+                id,
+                name,
+                arguments,
+                thought_signature: None,
+            });
+        }
+        let text = if state.text.is_empty() {
+            None
+        } else {
+            Some(state.text)
+        };
+        if text.is_none() && calls.is_empty() {
+            return Err(ModelError::FormatError(
+                "response has no text or tool calls; model may lack tool-calling support".into(),
+            ));
+        }
+        Ok(Response {
+            text,
+            tool_calls: calls,
+            usage: Usage {
+                input_tokens: state.input_tokens,
+                output_tokens: state.output_tokens,
+            },
+        })
+    }
+}
+
+fn note_block_start(value: &Value, state: &mut StreamState) -> Result<(), ModelError> {
+    let Some(block) = value.get("content_block") else {
+        return Ok(());
+    };
+    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+        return Ok(());
+    }
+    let index = value
+        .get("index")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ModelError::FormatError("missing content block index".into()))?;
+    state.tools.insert(
+        index,
+        ToolSlot {
+            id: block.get("id").and_then(Value::as_str).map(str::to_owned),
+            name: block.get("name").and_then(Value::as_str).map(str::to_owned),
+            arguments: String::new(),
+        },
+    );
+    Ok(())
+}
+
+fn note_block_delta(
+    value: &Value,
+    state: &mut StreamState,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<(), ModelError> {
+    let delta = value.get("delta");
+    match delta
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+    {
+        "text_delta" => {
+            if let Some(piece) = delta
+                .and_then(|item| item.get("text"))
+                .and_then(Value::as_str)
+            {
+                state.text.push_str(piece);
+                state.tail.push(piece, on_delta);
+            }
+        }
+        "input_json_delta" => {
+            let index = value
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| ModelError::FormatError("missing content block index".into()))?;
+            let slot = state.tools.get_mut(&index).ok_or_else(|| {
+                ModelError::FormatError("tool delta for content block that never started".into())
+            })?;
+            if let Some(partial) = delta
+                .and_then(|item| item.get("partial_json"))
+                .and_then(Value::as_str)
+            {
+                slot.arguments.push_str(partial);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 impl Model for Anthropic {
@@ -345,6 +654,14 @@ impl Model for Anthropic {
 
     fn complete(&self, req: &Request) -> Result<Response, ModelError> {
         self.complete_inner(req, None, true)
+    }
+
+    fn complete_stream(
+        &self,
+        req: &Request,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Response, ModelError> {
+        self.complete_stream_inner(req, on_delta)
     }
 
     fn list_models(&self) -> Result<Vec<String>, ModelError> {

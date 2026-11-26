@@ -134,6 +134,22 @@ impl Model for RateLimitedModel {
         drop(last);
         self.model.complete(request)
     }
+    fn complete_stream(
+        &self,
+        request: &Request,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Response, ModelError> {
+        let mut last = self
+            .last
+            .lock()
+            .map_err(|e| ModelError::Other(e.to_string()))?;
+        if let Some(previous) = *last {
+            std::thread::sleep(self.interval.saturating_sub(previous.elapsed()));
+        }
+        *last = Some(Instant::now());
+        drop(last);
+        self.model.complete_stream(request, on_delta)
+    }
 }
 
 /// Hashes tracked and non-ignored workspace paths without reading .env files.

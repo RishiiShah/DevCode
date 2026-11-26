@@ -353,7 +353,7 @@ MVP harness M0–M13 is on main (CLI loop, guard, manifest/rollback, gate, appro
 | ID | Status | Landed | Still short of peer |
 | :--- | :--- | :--- | :--- |
 | U1 | partial | Scroll pin + Ctrl-End | Full transcript UX vs Codex/opencode |
-| U2 | started | Progress merge into one bubble | **SSE / true token stream** deferred |
+| U2 | started | Progress merge into one bubble; SSE text deltas (OpenAI + Anthropic) into it | Cancel mid-stream, reasoning deltas (see U2a) |
 | U3 | partial | Ctrl-T tool cards | Richer tool timeline vs peers |
 | U4 | partial | Diff modal scroll clamp | Codex-level permission/diff chrome |
 | U5 | partial | Ctrl-K command palette | OpenCode slash surface depth |
@@ -363,7 +363,7 @@ MVP harness M0–M13 is on main (CLI loop, guard, manifest/rollback, gate, appro
 | U11 | partial | History vs scroll split (keys) | Full-screen ratatui E2E dogfood incomplete (RES-013) |
 | U12 | partial | Identical tool-loop → NoProgress | |
 
-- [ ] **U2a** Real SSE / streaming assistant tokens — bar: Codex / gemini-cli streaming
+- [ ] **U2a** Real SSE / streaming assistant tokens — bar: Codex / gemini-cli streaming. **Landed (still partial):** `Model::complete_stream` (default = `complete`), hand-rolled `src/agent/sse.rs`, OpenAI chat deltas + Anthropic `content_block_delta` with tool-call accumulation and chunk-safe key redaction; TUI-only (needs a progress sink), opt out with `DEVCODE_STREAM=0`. Fake chunked-SSE tests `m24_*`. Missing vs peers: Ctrl-C cannot cancel an in-flight read (120s idle timeout only), no reasoning deltas, no streamed tool-argument UI, no live keyed run, `--plain` not streamed.
 - [ ] **U13** Interactive full-screen TUI dogfood with live provider (not only `App` unit + `--plain`) — RES-013 gap
 
 P6/P7 (scripted dogfood + harder Gemini build) = **evidence**, not peer-done checkboxes.

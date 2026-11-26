@@ -115,6 +115,18 @@ pub trait Model: Send + Sync {
         text.to_string()
     }
     fn complete(&self, req: &Request) -> Result<Response, ModelError>;
+    /// Incremental completion. `on_delta` receives redacted text fragments whose
+    /// concatenation equals `redact_sensitive` of the returned `Response.text`.
+    /// The response body stays raw; the agent loop redacts it after the call.
+    /// Backends that do not stream ignore `on_delta` and call `complete`.
+    fn complete_stream(
+        &self,
+        req: &Request,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Response, ModelError> {
+        let _ = on_delta;
+        self.complete(req)
+    }
     /// Model ids the backend offers, for the UI's model picker.
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
         Err(ModelError::Other(

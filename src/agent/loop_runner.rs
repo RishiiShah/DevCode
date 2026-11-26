@@ -96,6 +96,9 @@ pub struct LoopLimits {
     pub context_window: Option<u64>,
     pub trace: bool,
     pub progress: Option<ProgressSink>,
+    /// When a progress sink is set, deliver assistant text as it arrives.
+    /// No sink (for example `--plain`) stays on one `complete` call.
+    pub stream: bool,
 }
 
 impl LoopLimits {
@@ -115,6 +118,7 @@ impl Default for LoopLimits {
             context_window: None,
             trace: false,
             progress: None,
+            stream: true,
         }
     }
 }
@@ -232,7 +236,20 @@ fn run_loop(
 
         let step_start = Instant::now();
         limits.emit(ProgressEvent::Thinking { step: steps + 1 });
-        let mut response = match model.complete(&req) {
+        let completion = if limits.stream && limits.progress.is_some() {
+            let mut buffer = String::new();
+            model.complete_stream(&req, &mut |delta| {
+                buffer.push_str(delta);
+                if !buffer.trim().is_empty() {
+                    limits.emit(ProgressEvent::Assistant {
+                        text: buffer.clone(),
+                    });
+                }
+            })
+        } else {
+            model.complete(&req)
+        };
+        let mut response = match completion {
             Ok(resp) => {
                 consecutive_format_errors = 0;
                 resp
