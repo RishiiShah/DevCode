@@ -4,10 +4,10 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1001-PRD
-REVISION       : 0.4.2-draft
+REVISION       : 0.4.4-draft
 STATUS         : Working Draft (Engineering Specification)
 AUTHOR         : DevCode Product Architecture Group
-OWNS           : Requirements (what): FR-1..6, NFR-1..9, Gates 1..8.
+OWNS           : Requirements (what): FR-1..7, NFR-1..9, Gates 1..9.
                  Mechanisms (how) live in ATE-1000-ARCH; cited, not repeated.
 SECTIONS       : 3 FR | 4 NFR | 5 Gates (acceptance tests)
 RELATED DOCS   : [docs/devcode.md](devcode.md), [docs/codebaseunderstanding.md](codebaseunderstanding.md)
@@ -19,6 +19,8 @@ RELATED DOCS   : [docs/devcode.md](devcode.md), [docs/codebaseunderstanding.md](
 ## 1.0 Product Vision & Purpose
 
 **DevCode** is a developer-centric agentic CLI harness: one responsive agent loop, dynamic permission profiles (`ask`, `plan`, `build`, `debug`, `security`), and deterministic verification gates. The differentiator is the uncompromising enforcement of quality gates before finalization, not conversational output. Edits are provisional on disk while checks run; external Git operations are outside enforcement.
+
+DevCode ships no model. Users connect their own (Anthropic, OpenAI/ChatGPT, Gemini, OpenAI-compatible endpoints). Goal: a harness that enforces best development practice (tests first, scoped edits, reversible changes) while spending fewer tokens than peer harnesses on the same task, and reporting every token transparently. Gates and token control live in the harness, never in the model (FR-7).
 
 Design: ATE-1000-ARCH. Codebase indexing and security tooling: ATE-1002-CBU.
 
@@ -92,6 +94,15 @@ Mechanism and hosting decisions: ARCH §6.2–6.3.
 - **FR-6.3 (Implementation Language & Single Binary)**: Implemented in **Rust**, one self-contained native binary per Tier 1 target (fully static on Linux musl), no external runtime. Rust does not by itself meet NFR-1 or NFR-2; those are verified by benchmark and remain unmeasured.
 - **FR-6.4 (Release Integrity & Signing)**: Every release publishes `SHA256SUMS` signed via **minisign** (`SHA256SUMS.minisig`) with a pinned Ed25519 public key embedded in the installers; CI adds Sigstore/cosign provenance attestations and claims no SLSA level until audited. Validate checksums and signatures before extraction.
 
+### FR-7: Token Efficiency, Transparency & Bring-Your-Own-Model
+- **FR-7.1 (Provider-neutral ledger)**: Record per model call: input, output, cache-read, cache-write, and reasoning tokens in one normalized schema across providers. A counter the provider does not report is `missing`, never `0`. Mark each figure `reported` or `estimated`.
+- **FR-7.2 (Attribution & visibility)**: Attribute each turn's input to system prompt, tool schemas, history, file reads, and command output. Show totals and the breakdown in `/status` and the end-of-task line, and write them to the tool log. Link spend to gate and rollback events.
+- **FR-7.3 (Enforced budgets)**: Enforce NFR-3 and NFR-4 with a test. Harness estimates are calibrated per provider against reported usage; report the divergence. An optional per-task token or cost cap stops the loop and says why.
+- **FR-7.4 (Prompt caching)**: Keep the prompt prefix stable. Apply each provider's caching mechanism in its adapter (explicit markers where required) and report the hit rate.
+- **FR-7.5 (Provider parity)**: Gates, scope, rollback, and budgets behave identically on every supported provider. Provider differences (tokenizer, caching, tool-call format, OAuth versus API key) are confined to adapters.
+- **FR-7.6 (Egress transparency)**: The user can see what is sent to the provider. Credentials are never sent (FR-4.2); sending content from files the user marks private is blocked.
+- **FR-7.7 (Dynamic capabilities)**: Keep one capability record per (provider, model): native and parallel tool calls, streaming and streaming usage, reasoning control, cache mechanism, context window, max output, edit format, prices. Source precedence: user config, provider `/models`, bundled table, conservative default; report the source. On observed failure (repeated malformed tool calls, rejected parameter) downgrade at runtime (text tool protocol, simpler schema, no streaming usage), log it, and show it in `/status`. Peer evidence: RES-016.
+
 ---
 
 ## 4.0 Non-Functional Requirements (NFR) & Benchmark Recipes
@@ -140,6 +151,9 @@ Flow: the developer submits a task; the loop applies the profile, records pre-ru
    - Setup: a dirty tracked file, a partially staged file, an untracked non-ignored file, and a gitignored file. Repeat in a non-Git directory.
    - Action: run shell commands that edit in place (`sed -i`, a script writing via `open().write`, `>` redirect), delete, and create files, then roll back.
    - Verification: changed non-ignored files match pre-step bytes, type, and mode; shell-created files are removed; the staged index is untouched; the gitignored file is reported unprotected, not restored. A command over budget is blocked unless approved, and approval appends `OVERRIDE_NO_SNAPSHOT`. A user edit to the same path during the command yields a conflict, not an overwrite.
+
+9. **Gate 9 (Token Ledger)**:
+   - Run one scripted task per provider adapter (Anthropic, OpenAI-compatible, Gemini; scripted fixtures, no live cost unless approved). Verify every call has a ledger row with normalized fields; unreported counters read `missing`; per-category totals equal the sum of calls; end-of-task numbers match the ledger. Exceeding NFR-3/4 or a task cap stops the run with a named reason. A paired RES-015 run reports pass rate and tokens for all runs, including failures.
 
 ---
 

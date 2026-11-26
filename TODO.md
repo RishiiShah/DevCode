@@ -4,7 +4,7 @@
 ================================================================================
 STANDARD       : ATE-1000 (Automated Technical Engineering Standard Series)
 DOCUMENT ID    : ATE-1004-TODO
-REVISION       : 0.3.1
+REVISION       : 0.3.2
 STATUS         : Living tracker (non-normative; specs win on conflict)
 AUTHOR         : DevCode Core Engineering Group
 OWNS           : What is open, what is partial, what comes next
@@ -33,8 +33,17 @@ UPDATED        : 2026-11-26
 ### 2.1 Next work order
 Handoff rules: one item per commit (`<type>: <what>`); stage named files only; never push. Gate before each commit: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`. TDD: failing test first. No live LLM runs (cost) unless the user says so.
 
-1. **U3/U17** Ctrl-T on any historical tool group (not only latest): selection cursor over groups.
-2. **U13** live TUI dogfood (user runs it; needs a key). **U2a** remainder, **U16** remainder (`/fork`, `/rewind`), **P10a–d**, sandbox: after the above.
+Goal (PRD §1.0, FR-7): best-practice enforcement, fewer tokens, transparent token reporting, on any user-connected model.
+0. **Capability record** (FR-7.7, RES-016) One record per (provider, model); source precedence; runtime downgrade with log. Do first: ledger, caching, budgets and tool fallback read it.
+1. **Token ledger** (FR-7.1, FR-7.2) Normalized per-call ledger across Anthropic, OpenAI-compatible, Gemini; `missing` ≠ 0; per-category attribution in `/status`, end-of-task line, tool log. Check which adapters already parse usage and cache fields first. Test: Gate 9.
+2. **Enforce budgets** (FR-7.3) NFR-3/NFR-4 tests; per-provider estimate calibration; optional task cap.
+3. **Prompt caching** (FR-7.4) Stable prefix; per-adapter cache markers; hit-rate reporting.
+4. **Harness evidence** (FR-7.5, RES-015) Paired-task pilot across 2–3 providers plus fault fixtures. Measure pass rate, tokens, gate and rollback interventions before claiming peer superiority.
+5. **Provider connectivity, in parallel** P10a Anthropic live dogfood and P10b OAuth (adoption blocker). Defer P9, P10c, P10d, U14, U15, U18.
+6. **Rollback and release** Close concurrent GC and managed checkpoint collisions (ARCH §4.2). Rehearse release matrix, integrity (ARCH §6.3).
+7. **Runtime and project context** OS-backed shell containment (ARCH §6.1–§6.2). Bounded root project instructions before changing `/init`.
+8. **Harness capabilities** `debug` profile and read-only MCP; `security` profile (FR-5). Use ledger and pilot data to prioritize retrieval, compaction, session branching.
+9. **TUI follow-up** U3/U17, U13, U2a behind the above.
 
 Landed on `feat/peer-bar-next`: P11, P12, S1, S2, U16b, U16 (`/compact`, `/export`), T1 (`m13_connect` PTY deadline). Landed baseline: MVP harness M0–M13 (CLI loop, guard, manifest/rollback, gate, approvals, discipline, NIM live per RES-012). That is scaffolding, not peer parity.
 
@@ -53,7 +62,7 @@ Landed on `feat/peer-bar-next`: P11, P12, S1, S2, U16b, U16 (`/compact`, `/expor
 | P12 | partial | `Session::list_models` and `App::on_models` filter non-chat models (embed/rerank/guard/detector/tts/whisper/safety) while keeping typed ids usable | Provider capability metadata beyond id heuristics |
 
 - [ ] **P10a** Native Anthropic Messages adapter (bar: OpenCode/pi). *Landed*: `src/agent/anthropic.rs`, preset `anthropic`, object `tool_choice` (omitted with empty `tools`), `interleaved-thinking` beta header, `/effort` → `thinking.budget_tokens`; tests `m20_anthropic`. *Missing*: Anthropic OAuth, forced SSE on `complete()`, live keyed dogfood.
-- [ ] **P10b** OAuth / device-code login for at least one provider (bar: Codex, gemini-cli). *Landed*: Google OAuth in `src/auth.rs` (`auth login gemini --oauth`, loopback callback, `NO_BROWSER=1` / `--with-stdin` paste-code), `oauth-gemini.json`, auto refresh on expiry and `401`, Code Assist backend `src/agent/code_assist.rs` (`gemini:oauth` slot or fallback); tests `m21_oauth`, `m25_code_assist`. *Missing*: device-code flow, non-Gemini OAuth (Codex, Anthropic), live Google OAuth dogfood.
+- [ ] **P10b** (ToS risk, RES-016: Google and Anthropic forbid third-party subscription OAuth; do not extend to Anthropic; review Gemini OAuth) OAuth / device-code login for at least one provider (bar: Codex, gemini-cli). *Landed*: Google OAuth in `src/auth.rs` (`auth login gemini --oauth`, loopback callback, `NO_BROWSER=1` / `--with-stdin` paste-code), `oauth-gemini.json`, auto refresh on expiry and `401`, Code Assist backend `src/agent/code_assist.rs` (`gemini:oauth` slot or fallback); tests `m21_oauth`, `m25_code_assist`. *Missing*: device-code flow, non-Gemini OAuth (Codex, Anthropic), live Google OAuth dogfood.
 - [ ] **P10c** OS keyring backend (bar: Codex, gemini-cli HybridTokenStorage). *Landed*: opt-in `DEVCODE_CREDENTIALS_STORE=auto` (service `devcode`, account `credentials`), falling back to `credentials.json`; unit tests use an in-memory blob. *Missing*: file is still the default; no Windows backend; `oauth-gemini.json` stays a file; one keyring blob.
 - [ ] **P10d** Multi-credential + `auth switch` (bar: OpenCode). *Landed*: `nim` or `nim:alias` slots; `UserSettings.active_slot`; `auth switch` selects a stored key without changing the provider; `/connect nim:work`. *Missing*: env still wins without a switch, OAuth only for exact `gemini`, one keyring blob, no OpenCode multi-account map.
 - [x] **P10e** Env-vs-stored precedence. *Decision (deliberate difference from pi/OpenCode)*: an explicit `auth switch` or `/connect nim:alias` beats the env var; with no switch, env beats stored (12-factor/CI). `credentials::switched_key`; tests `m22_auth_switch`, `m12_provider`.
@@ -64,7 +73,7 @@ Landed on `feat/peer-bar-next`: P11, P12, S1, S2, U16b, U16 (`/compact`, `/expor
 | :--- | :--- | :--- | :--- |
 | U1 | partial | Scroll pin, Ctrl-End | Full transcript UX vs Codex/opencode |
 | U2 | started | One progress bubble; SSE text + reasoning deltas (OpenAI, Anthropic, Code Assist); Ctrl-C cancel | Streamed tool-argument UI (U2a) |
-| U3 | partial | Grouped tool lines (Explored/Ran/Edited, +N −M), Ctrl-T expands to cards and diffs | Expand any historical group, not only the latest |
+| U3 | partial | Grouped reads and commands (Explored/Ran), inline edit diffs, Ctrl-T expands latest group | Expand any historical group, not only the latest |
 | U4 | partial | Codex-style docked approval panel (numbered diff, option list, Enter = No on risky commands); edit diffs in transcript | Scoped always-allow command rules |
 | U5 | partial | Ctrl-K palette; live slash suggestions; docked pickers open on the current choice | OpenCode slash-surface depth |
 | U6 | partial | In-repo fuzzy scorer | Peer fuzzy quality and ranking |
@@ -78,6 +87,7 @@ Landed on `feat/peer-bar-next`: P11, P12, S1, S2, U16b, U16 (`/compact`, `/expor
 - [ ] **U14** Syntax highlighting & themes (bar: Codex, OpenCode, Mistral Vibe). *Missing*: `syntect` code-fence and diff highlighting in `src/tui/markdown.rs` and `src/tui/view.rs`, italics/links/task-lists, `/theme` picker, `OSC 11` light/dark background auto-detection.
 - [ ] **U15** Composer `@` mentions, `!` shell mode & editor ergonomics (bar: Codex, OpenCode, Pi, Gemini CLI). *Missing*: `@` fuzzy file-mention popup, `!` shell execution mode, `$EDITOR` prompt launch, `[paste #N]` collapse, clipboard image paste, `Ctrl-R` persistent history search, optional Vim mode.
 - [x] **U16a** Conversations saved per prompt to `<state>/conversations/`; `devcode -c`, `--resume [ID]`, `/resume` picker replays the transcript (ARCH §4.3; `src/conversation.rs`, `tests/m28_resume.rs`). Harness state moved out of the workspace after `rm -rf` deleted `.devcode/blobs` (`tests/m27_snapshots.rs`).
+- [x] **U16c** Resume restores declared scope after compaction. Export creates private files on Unix and refuses existing destinations (`tests/m28_resume.rs`).
 - [ ] **U16** Session & compaction UI (bar: OpenCode, Pi, Codex, Cline; `RES-005`). *Landed*: `/resume` picker (U16a), `/resume` diff/outcome/token fidelity (U16b), `/compact` trigger and `/export` markdown (U16). *Missing*: `/fork` (`/tree`) branching, double-`Esc` prompt `/rewind`.
 - [ ] **U17** Approval, diff & tool-card depth (bar: OpenCode, Codex, Kimi Code, Stakpak). *Landed*: reject then type the correction, delivered mid-run (`SteerInbox`). *Missing*: scoped command-pattern always-allow rules, standalone `/diff` viewer (unified + split), expanding/collapsing arbitrary historical tool cards beyond latest `Ctrl-T`.
 - [ ] **U18** Terminal protocols & polish (bar: Codex, Pi, Mistral Vibe, OpenCode). *Missing*: synchronized output (`\x1b[?2026h`/`l`), transcript scrollbar thumb, double/triple-click selection, `OSC 8` clickable links, Kitty keyboard protocol, `OSC 9`/`777`/BEL completion alerts, `--no-alt-screen` inline scrollback mode.
@@ -86,11 +96,15 @@ P6/P7 (scripted dogfood and the harder Gemini build) are **evidence**, not peer-
 
 ### 2.4 Runtime and release
 - [ ] Sandbox is path allowlist + env strip + PGID kill only; **no** Seatbelt/bwrap/Landlock (bar: Codex).
-- [ ] Installer scripts exist; **no** minisign or peer-grade signed channel (bar: Codex).
+- [ ] Release workflow rehearses macOS and glibc Linux builds, installer smoke tests, wheels, and checksums before drafting a tag release (`packaging/README.md`). Hosted rehearsal, minisign, and provenance pending (ARCH §6.3).
 - [ ] Windows native: not started (A1).
 - [ ] `debug` / `security` profiles: not started (A2).
 - [ ] Ignore `__pycache__` in command-change counting (RES-013 #3).
-- [ ] Peer tokens-per-task comparison.
+- [ ] Peer tokens-per-task comparison. Task pilot and measurement protocol drafted ([RES-015](docs/research/harness-bakeoff.md)).
+- [x] GC retains managed-process pre-start snapshot blobs and skips blob pruning when a snapshot is unreadable (`tests/m3_manifest.rs`).
+- [ ] Coordinate blob publication with GC and prevent managed checkpoint collisions across sessions (ARCH §4.2).
+- [ ] Review workspace boundaries and consistency for shell dependency-manifest protection (ARCH §6.4, `tests/m8_approval.rs`).
+- [ ] Preserve transcript fidelity across compaction and export (U16, `tests/m28_resume.rs`).
 
 ---
 

@@ -52,6 +52,7 @@ Research notes (informative, never normative), all under `docs/research/`:
 | RES-012 | `first-live-runs.md` | First live NIM runs |
 | RES-013 | `tui-dogfood-and-harder-task.md` | TUI dogfood and harder real-repo task |
 | RES-014 | `account-connect.md` | Account connect vs peers |
+| RES-016 | `capability-and-token-peers.md` | Peer capability records, token ledger, caching, fallback, OAuth terms |
 
 ## Editing rules
 
