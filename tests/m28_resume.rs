@@ -271,6 +271,16 @@ fn session_compact_and_export_markdown() {
     assert!(md.contains("```diff"));
     assert!(md.contains("-one") && md.contains("+two"));
     assert!(md.contains("second answer"));
+    assert!(s.export_markdown(&exported).is_err());
+    assert_eq!(std::fs::read_to_string(&exported).unwrap(), md);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&exported).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     let summary = s.compact().unwrap();
     assert!(summary.contains("Compacted conversation"), "{summary}");
@@ -305,6 +315,7 @@ fn resume_restores_declared_scope_for_next_edit() {
             tool_calls: Vec::new(),
             usage: Usage::default(),
         }),
+        reply("ready"),
     ]);
     let mut first = Session::new(
         dir.path().to_path_buf(),
@@ -314,6 +325,9 @@ fn resume_restores_declared_scope_for_next_edit() {
         devcode::tools::registry(dir.path().to_path_buf(), true),
     );
     first.prompt("prepare").unwrap();
+
+    first.prompt("prepare another turn").unwrap();
+    first.compact().unwrap();
 
     // New session resumes and edits hero.tsx directly without re-calling declare_scope.
     let second_model = ScriptedModel::new(vec![
@@ -345,7 +359,8 @@ fn resume_restores_declared_scope_for_next_edit() {
         Box::new(second_model),
         devcode::tools::registry(dir.path().to_path_buf(), true),
     );
-    second.resume("").unwrap();
+    let loaded = second.resume("").unwrap();
+    assert!(loaded.iter().all(|m| m.tool_calls.is_empty()));
     let run = second.prompt("continue").unwrap();
     assert_eq!(run.exit_reason, devcode::agent::ExitReason::Completed);
     assert_eq!(

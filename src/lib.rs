@@ -190,8 +190,13 @@ impl Session {
         if self.title.is_empty() {
             self.title = conversation::title_for(prompt);
         }
+        self.save_conversation();
+        result
+    }
+
+    fn save_conversation(&self) {
         // Saving is best effort: a full disk must not fail the turn that already ran.
-        let _ = conversation::save_with_meta(
+        let _ = conversation::save_with_scope(
             &self.root,
             &self.conversation,
             &self.title,
@@ -202,8 +207,8 @@ impl Session {
                 total_out: self.total_out,
                 context_used: self.context_used,
             },
+            self.tools.scope_snapshot(),
         );
-        result
     }
 
     /// Forgets the conversation (`/clear`); the next prompt starts a new saved one.
@@ -215,7 +220,7 @@ impl Session {
         self.total_in = 0;
         self.total_out = 0;
         self.context_used = 0;
-        self.tools.clear_scope();
+        self.tools.restore_scope(Default::default());
     }
 
     /// Deterministically compacts the active conversation history (`/compact`) without an LLM call.
@@ -243,18 +248,7 @@ impl Session {
         };
         self.history = discipline::compact_messages(&self.history, &ctx);
         self.context_used = 0;
-        let _ = conversation::save_with_meta(
-            &self.root,
-            &self.conversation,
-            &self.title,
-            &self.history,
-            &self.tool_outcomes,
-            conversation::ConversationUsage {
-                total_in: self.total_in,
-                total_out: self.total_out,
-                context_used: self.context_used,
-            },
-        );
+        self.save_conversation();
         Ok(format!(
             "Compacted conversation ({before} -> {} messages).",
             self.history.len()
@@ -372,8 +366,20 @@ impl Session {
         if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| DevCodeError::Config(e.to_string()))?;
         }
-        std::fs::write(&dest, self.format_markdown())
-            .map_err(|e| DevCodeError::Config(e.to_string()))?;
+        use std::io::Write as _;
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&dest)
+            .map_err(|e| DevCodeError::Config(format!("{}: {e}", dest.display())))?;
+        file.write_all(self.format_markdown().as_bytes())
+            .map_err(|e| DevCodeError::Config(format!("{}: {e}", dest.display())))?;
         Ok(dest)
     }
 
@@ -413,7 +419,12 @@ impl Session {
         self.total_in = loaded.total_in;
         self.total_out = loaded.total_out;
         self.context_used = loaded.context_used;
-        self.tools.restore_scope_from_messages(&loaded.messages);
+        if let Some(scope) = &loaded.scope {
+            self.tools.restore_scope(scope.clone());
+        } else {
+            self.tools
+                .restore_legacy_scope(&loaded.messages, &loaded.tool_outcomes);
+        }
         Ok(loaded)
     }
     /// Re-reads `.devcode.json` and rebuilds the model; keeps tools and approval state.

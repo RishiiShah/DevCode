@@ -1099,9 +1099,9 @@ fn numbered_diff(text: &str) -> (Vec<Line<'static>>, usize, usize) {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let (mut old, mut new, mut added, mut removed) = (0usize, 0usize, 0usize, 0usize);
     let mut lines = Vec::new();
+    let mut in_hunk = false;
     for l in text.lines() {
-        if l.starts_with("---")
-            || l.starts_with("+++")
+        if (!in_hunk && (l.starts_with("--- ") || l.starts_with("+++ ")))
             || l.starts_with('\\')
             || l.starts_with("Approve edit to '")
             || l.starts_with("Edit to '")
@@ -1110,6 +1110,7 @@ fn numbered_diff(text: &str) -> (Vec<Line<'static>>, usize, usize) {
             continue;
         }
         if let Some(hunk) = l.strip_prefix("@@ ") {
+            in_hunk = true;
             let start = |prefix: char| {
                 hunk.split_whitespace()
                     .find_map(|part| part.strip_prefix(prefix))
@@ -1695,7 +1696,7 @@ mod tests {
     #[test]
     fn numbered_diff_keeps_distinct_hunk_styles() {
         let (lines, added, removed) =
-            numbered_diff("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-removed\n+added\n context");
+            numbered_diff("--- a/x\n+++ b/x\n@@ -1 +1 @@\n--- removed\n+++ added\n context");
         assert_eq!((added, removed), (1, 1));
         assert_eq!(lines[0].spans[1].style.fg, Some(Color::Red));
         assert_eq!(lines[1].spans[1].style.fg, Some(Color::Green));

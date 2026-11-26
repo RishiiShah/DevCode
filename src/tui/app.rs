@@ -2507,6 +2507,7 @@ mod tests {
                     Message::assistant("done", Vec::new()),
                 ],
                 tool_outcomes: Default::default(),
+                scope: None,
                 total_in: 420,
                 total_out: 80,
                 context_used: 300,

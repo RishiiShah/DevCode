@@ -146,7 +146,7 @@ fn extract_heredocs_from_line(line: &str) -> (String, Vec<(String, bool)>) {
     (cleaned, heredocs)
 }
 
-/// Checks whether `target` resolves into `.devcode/` or a guard-set file.
+/// Checks whether the target is harness state, a dependency manifest, or a guard-set file.
 pub fn is_protected_path(target: &str, root: &Path, guard_set: &[PathBuf]) -> bool {
     let clean_target = target.trim().trim_matches('\'').trim_matches('"');
     if clean_target.is_empty() {

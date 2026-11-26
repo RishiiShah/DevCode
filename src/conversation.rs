@@ -4,6 +4,7 @@
 //! conversation in the project's state dir (`crate::state`).
 
 use crate::agent::{Message, Role, ToolOutcome};
+use crate::discipline::ScopeState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -17,6 +18,8 @@ struct Saved {
     updated: u64,
     title: String,
     messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<ScopeState>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     tool_outcomes: BTreeMap<String, ToolOutcome>,
     #[serde(default)]
@@ -33,6 +36,7 @@ pub struct LoadedConversation {
     pub id: String,
     pub title: String,
     pub messages: Vec<Message>,
+    pub scope: Option<ScopeState>,
     pub tool_outcomes: BTreeMap<String, ToolOutcome>,
     pub total_in: u64,
     pub total_out: u64,
@@ -112,6 +116,18 @@ pub fn save_with_meta(
     tool_outcomes: &BTreeMap<String, ToolOutcome>,
     usage: ConversationUsage,
 ) -> std::io::Result<()> {
+    save_with_scope(root, id, title, messages, tool_outcomes, usage, None)
+}
+
+pub(crate) fn save_with_scope(
+    root: &Path,
+    id: &str,
+    title: &str,
+    messages: &[Message],
+    tool_outcomes: &BTreeMap<String, ToolOutcome>,
+    usage: ConversationUsage,
+    scope: Option<ScopeState>,
+) -> std::io::Result<()> {
     let dir = dir(root);
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -124,6 +140,7 @@ pub fn save_with_meta(
         updated: now(),
         title: title.to_string(),
         messages: messages.to_vec(),
+        scope,
         tool_outcomes: tool_outcomes.clone(),
         total_in: usage.total_in,
         total_out: usage.total_out,
@@ -181,6 +198,7 @@ pub fn load_full(root: &Path, id: &str) -> std::io::Result<LoadedConversation> {
         id: saved.id,
         title: saved.title,
         messages: saved.messages,
+        scope: saved.scope,
         tool_outcomes: saved.tool_outcomes,
         total_in: saved.total_in,
         total_out: saved.total_out,
