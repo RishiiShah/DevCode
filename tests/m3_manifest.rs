@@ -586,15 +586,26 @@ fn state_pruning_expires_old_completed_manifests_and_keeps_referenced_blobs() {
             symlink_target: None,
         },
     );
+    let mut snapshot = devcode::manifest::GuardSetSnapshot {
+        files: rec_files,
+        total_blob_bytes: 16,
+    };
     fs::write(
         recovery_dir.join("1.json"),
-        serde_json::to_vec(&devcode::manifest::GuardSetSnapshot {
-            files: rec_files,
-            total_blob_bytes: 16,
-        })
-        .unwrap(),
+        serde_json::to_vec(&snapshot).unwrap(),
     )
     .unwrap();
+
+    let managed_blob = store_blob(root, b"managed process backup").unwrap();
+    let managed_dir = devcode::state::dir(root).join("managed");
+    fs::create_dir_all(&managed_dir).unwrap();
+    snapshot.files.values_mut().next().unwrap().sha256 = Some(managed_blob.clone());
+    fs::write(
+        managed_dir.join("proc-1.before.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    fs::write(managed_dir.join("proc-1.log"), "process log").unwrap();
 
     let report = prune_state_at(root, now).unwrap();
     assert_eq!(report.pruned_manifests, 1);
@@ -606,6 +617,7 @@ fn state_pruning_expires_old_completed_manifests_and_keeps_referenced_blobs() {
     assert!(blobs_dir.join(&shared_blob).exists());
     assert!(blobs_dir.join(&fresh_only_blob).exists());
     assert!(blobs_dir.join(&recovery_blob).exists());
+    assert!(blobs_dir.join(&managed_blob).exists());
     assert!(blobs_dir.join(&incomplete_blob).exists());
     assert!(!devcode::state::manifests_dir(root)
         .join("old_session")
@@ -618,6 +630,12 @@ fn state_pruning_expires_old_completed_manifests_and_keeps_referenced_blobs() {
         .join("unresolved_session")
         .join("1.json")
         .exists());
+
+    // A corrupt snapshot can hide a live reference. Keep blobs until it is resolved.
+    fs::write(managed_dir.join("proc-2.before.json"), "{").unwrap();
+    let orphan_blob = store_blob(root, b"orphan while references are unknown").unwrap();
+    assert_eq!(prune_state_at(root, now).unwrap().pruned_blobs, 0);
+    assert!(blobs_dir.join(orphan_blob).exists());
 }
 
 #[test]

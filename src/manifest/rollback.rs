@@ -451,6 +451,16 @@ pub fn prune_state_at(root: &Path, now_secs: u64) -> Result<GcReport, ManifestEr
         collect_recovery_blobs(&recovery_root, &mut referenced_blobs, &mut all_refs_known);
     }
 
+    let managed_root = crate::state::dir(root).join("managed");
+    if managed_root.exists() {
+        collect_snapshot_blobs(
+            &managed_root,
+            ".before.json",
+            &mut referenced_blobs,
+            &mut all_refs_known,
+        );
+    }
+
     // Never evict a potentially required backup if any manifest or recovery snapshot failed to parse.
     if all_refs_known {
         let blobs_root = crate::state::blobs_dir(root);
@@ -585,33 +595,35 @@ fn collect_recovery_blobs(
         if !path.is_dir() {
             continue;
         }
-        let Ok(files) = fs::read_dir(&path) else {
+        collect_snapshot_blobs(&path, ".json", referenced_blobs, all_refs_known);
+    }
+}
+
+fn collect_snapshot_blobs(
+    dir: &Path,
+    suffix: &str,
+    referenced_blobs: &mut HashSet<String>,
+    all_refs_known: &mut bool,
+) {
+    let Ok(files) = fs::read_dir(dir) else {
+        *all_refs_known = false;
+        return;
+    };
+    for file in files {
+        let Ok(file) = file else {
             *all_refs_known = false;
             continue;
         };
-        for file in files {
-            let Ok(file) = file else {
-                *all_refs_known = false;
-                continue;
-            };
-            let fpath = file.path();
-            if fpath.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(bytes) = fs::read(&fpath) else {
-                *all_refs_known = false;
-                continue;
-            };
-            let Ok(snap) = serde_json::from_slice::<crate::manifest::GuardSetSnapshot>(&bytes)
-            else {
-                *all_refs_known = false;
-                continue;
-            };
-            for rec in snap.files.values() {
-                if let Some(sha) = &rec.sha256 {
-                    referenced_blobs.insert(sha.clone());
-                }
-            }
+        if !file.file_name().to_string_lossy().ends_with(suffix) {
+            continue;
         }
+        let snapshot = fs::read(file.path()).ok().and_then(|bytes| {
+            serde_json::from_slice::<crate::manifest::GuardSetSnapshot>(&bytes).ok()
+        });
+        let Some(snapshot) = snapshot else {
+            *all_refs_known = false;
+            continue;
+        };
+        referenced_blobs.extend(snapshot.files.into_values().filter_map(|rec| rec.sha256));
     }
 }
