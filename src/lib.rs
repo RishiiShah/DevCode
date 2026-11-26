@@ -67,6 +67,8 @@ pub struct Session {
     /// Id and title under which the conversation is saved (`conversation`).
     conversation: String,
     title: String,
+    /// Explicit context window configured before model switches (None = use model table / default).
+    config_context_window: Option<u64>,
 }
 
 /// A turn cut short (cancel, step limit) can end on tool calls without results, which providers
@@ -95,6 +97,13 @@ fn close_dangling_tool_calls(messages: &mut Vec<agent::Message>) {
         ));
     }
 }
+fn explicit_config_window(config: &Config) -> Option<u64> {
+    config.provider.as_ref().and_then(|p| {
+        (p.context_window > 0 && config::model_context_window(&p.model) != Some(p.context_window))
+            .then_some(p.context_window)
+    })
+}
+
 impl Session {
     pub fn new(
         root: std::path::PathBuf,
@@ -104,6 +113,7 @@ impl Session {
         tools: agent::ToolRegistry,
     ) -> Self {
         let cancel = tools.cancel_token().unwrap_or_default();
+        let config_context_window = explicit_config_window(&config);
         Self {
             profile,
             config,
@@ -117,13 +127,14 @@ impl Session {
             steer: Default::default(),
             conversation: conversation::new_id(),
             title: String::new(),
+            config_context_window,
         }
     }
     /// Runs one user turn on top of the conversation so far and records the turn in it.
     pub fn prompt(&mut self, prompt: &str) -> Result<agent::LoopResult, DevCodeError> {
         let limits = agent::LoopLimits {
             history: self.history.clone(),
-            context_window: self.config.provider.as_ref().map(|p| p.context_window),
+            context_window: self.context_window(),
             trace: self.trace,
             progress: self.progress.clone(),
             stream: stream_enabled(std::env::var("DEVCODE_STREAM").ok().as_deref()),
@@ -198,6 +209,7 @@ impl Session {
     /// Re-reads `.devcode.json` and rebuilds the model; keeps tools and approval state.
     pub fn reload(&mut self, cli: &Cli) -> Result<(), DevCodeError> {
         let (config, model) = load_provider(&self.root, cli)?;
+        self.config_context_window = explicit_config_window(&config);
         self.config = config;
         self.model = model;
         Ok(())
@@ -222,7 +234,18 @@ impl Session {
     }
     /// Configured context window of the current model, in tokens.
     pub fn context_window(&self) -> Option<u64> {
-        self.config.provider.as_ref().map(|p| p.context_window)
+        self.config
+            .provider
+            .as_ref()
+            .map(|p| p.effective_context_window().0)
+    }
+
+    /// Source of the active context window (`"config"`, `"model"`, or `"default"`).
+    pub fn context_window_source(&self) -> Option<&'static str> {
+        self.config
+            .provider
+            .as_ref()
+            .map(|p| p.effective_context_window().1.as_str())
     }
 
     /// Status line items saved by `/statusline`, if any.
@@ -297,6 +320,9 @@ impl Session {
             return Err(DevCodeError::Config("model id cannot be empty".into()));
         }
         provider.model = id.to_owned();
+        provider.context_window = config::model_context_window(id)
+            .or(self.config_context_window)
+            .unwrap_or(0);
         // An effort the new model does not accept would make every request fail.
         let still_valid = provider
             .extra_body
@@ -317,13 +343,15 @@ impl Session {
             ))
         })?;
         let old = self.config.provider.clone();
+        self.config_context_window = None;
         let provider = config::ProviderConfig {
             kind: preset.kind,
             base_url: preset.base_url.into(),
             api_key_env: preset.api_key_env.into(),
             connector: Some(preset.name.into()),
             model: preset.default_model.into(),
-            context_window: old.as_ref().map_or(32000, |p| p.context_window.max(1)),
+            context_window: config::model_context_window(preset.default_model)
+                .unwrap_or(config::DEFAULT_CONTEXT_WINDOW),
             max_rpm: old.and_then(|p| p.max_rpm),
             // Provider-specific options such as reasoning_effort do not carry over.
             extra_body: Default::default(),
@@ -547,7 +575,7 @@ fn load_provider(
 pub enum RunOutput {
     Rollback(manifest::RollbackReport),
     Prompt(agent::LoopResult),
-    Repl(Session),
+    Repl(Box<Session>),
     Auth(Vec<String>),
 }
 
@@ -589,7 +617,7 @@ pub fn run(cli: Cli) -> Result<RunOutput, DevCodeError> {
     }
     match cli.prompt {
         Some(prompt) => session.prompt(&prompt).map(RunOutput::Prompt),
-        None => Ok(RunOutput::Repl(session)),
+        None => Ok(RunOutput::Repl(Box::new(session))),
     }
 }
 

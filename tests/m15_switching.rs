@@ -113,3 +113,37 @@ fn switching_provider_model_and_effort() {
     assert_eq!(p.model, "my-custom-model");
     assert_eq!(p.api_key_env, "GEMINI_API_KEY");
 }
+
+#[test]
+fn per_model_context_window_updates_on_switch_and_preserves_unknown_config() {
+    let root = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    std::env::set_var("DEVCODE_CONFIG_DIR", store.path().join("config"));
+
+    let mut cfg = provider("nim", preset("nim").unwrap().base_url);
+    cfg.model = "custom-local-model".into();
+    cfg.context_window = 16_384;
+    let mut s = session(root.path(), Some(cfg));
+    assert_eq!(s.context_window(), Some(16_384));
+    assert_eq!(s.context_window_source(), Some("config"));
+
+    // Known preset catalog models get their real window, not 32k.
+    s.set_model("nvidia/nemotron-3.5-super-vl-120b-a12b")
+        .unwrap();
+    assert_eq!(s.context_window(), Some(131_072));
+    assert_eq!(s.context_window_source(), Some("model"));
+    assert!(!devcode::discipline::compaction::should_compact(
+        10_000,
+        s.context_window().unwrap()
+    ));
+
+    // Switching back to an unknown model preserves the configured value.
+    s.set_model("another-unknown-model").unwrap();
+    assert_eq!(s.context_window(), Some(16_384));
+    assert_eq!(s.context_window_source(), Some("config"));
+
+    // Switching providers picks up the preset model's window.
+    s.set_provider("gemini").unwrap();
+    assert_eq!(s.context_window(), Some(1_048_576));
+    assert_eq!(s.context_window_source(), Some("model"));
+}

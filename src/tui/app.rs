@@ -154,6 +154,7 @@ pub struct App {
     pub dragging: bool,
     /// Configured context window and the size of the latest request, for the status line.
     pub context_window: Option<u64>,
+    pub context_source: Option<&'static str>,
     pub context_used: u64,
     /// Git branch of the working folder, read at start and after each run.
     pub branch: Option<String>,
@@ -286,6 +287,7 @@ impl App {
             selection: None,
             dragging: false,
             context_window: None,
+            context_source: None,
             context_used: 0,
             branch: git_branch(),
             statusline: STATUSLINE_ITEMS
@@ -352,12 +354,14 @@ impl App {
             }
             Ev::Provider(label, window) => {
                 self.context_window = window;
+                self.context_source = None;
                 self.context_used = 0;
                 // Drop the previous provider's catalog; prefetch fills models next.
                 self.models.clear();
                 self.items.push(Item::Info(format!("now using {label}")));
                 self.provider = label;
             }
+            Ev::ContextSource(source) => self.context_source = source,
             Ev::Efforts(levels) => {
                 if matches!(
                     self.modal,
@@ -603,10 +607,14 @@ impl App {
 
     fn status_lines(&self) -> Vec<String> {
         let cwd = std::env::current_dir().unwrap_or_default();
+        let source = self
+            .context_source
+            .map(|s| format!(" ({s})"))
+            .unwrap_or_default();
         let context = match (self.context_window, self.context_used) {
-            (Some(w), 0) => format!("{} window, nothing sent yet", tokens(w)),
+            (Some(w), 0) => format!("{} window{source}, nothing sent yet", tokens(w)),
             (Some(w), used) => format!(
-                "{} of {} used ({}% left)",
+                "{} of {} used ({}% left{source})",
                 tokens(used),
                 tokens(w),
                 self.context_left().unwrap_or(0)
@@ -1917,6 +1925,8 @@ fn hint_for(message: &str) -> String {
 pub fn init_template(provider: &str, test_command: Option<&str>) -> Option<String> {
     let preset = crate::config::preset(provider)?;
     let (connector, base_url, model) = (preset.name, preset.base_url, preset.default_model);
+    let context_window =
+        crate::config::model_context_window(model).unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW);
     let mut value = serde_json::json!({
         "provider": {
             "kind": preset.kind.as_str(),
@@ -1924,7 +1934,7 @@ pub fn init_template(provider: &str, test_command: Option<&str>) -> Option<Strin
             "connector": connector,
             "api_key_env": preset.api_key_env,
             "model": model,
-            "context_window": 32000
+            "context_window": context_window
         }
     });
     if let Some(cmd) = test_command {
@@ -3283,12 +3293,13 @@ mod tests {
     fn status_command_lists_session_details() {
         let mut a = app();
         a.context_window = Some(128_000);
+        a.on_event(Ev::ContextSource(Some("model")));
         type_str(&mut a, "/status");
         a.on_key(key(KeyCode::Enter));
         let text = format!("{:?}", a.items);
         for part in [
             "model",
-            "context     128.0k window",
+            "context     128.0k window (model)",
             "tokens",
             "branch",
             "folder",

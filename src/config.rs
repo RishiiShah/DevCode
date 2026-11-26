@@ -4,6 +4,93 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 32_000;
+
+/// Where the active model's context window came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextWindowSource {
+    Config,
+    Model,
+    Default,
+}
+
+impl ContextWindowSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Model => "model",
+            Self::Default => "default",
+        }
+    }
+}
+
+/// Known context windows (in tokens) for preset provider catalogs.
+/// Unknown models return `None` so callers keep the configured or default value.
+pub fn model_context_window(model: &str) -> Option<u64> {
+    let lower = model.trim().to_ascii_lowercase();
+    let bare = lower
+        .strip_prefix("models/")
+        .or_else(|| lower.strip_prefix("nvidia/"))
+        .or_else(|| lower.strip_prefix("google/"))
+        .or_else(|| lower.strip_prefix("anthropic/"))
+        .or_else(|| lower.strip_prefix("openai/"))
+        .unwrap_or(lower.as_str());
+
+    if bare.starts_with("nemotron-3.5-super")
+        || bare.starts_with("nemotron-3-super")
+        || bare.starts_with("nemotron-3-nano")
+        || bare.starts_with("nemotron-super")
+        || bare.starts_with("nemotron-ultra")
+        || bare.starts_with("llama-3.1-nemotron")
+        || bare.starts_with("llama-3.3-nemotron")
+    {
+        return Some(131_072);
+    }
+    if bare.starts_with("gemini-3")
+        || bare.starts_with("gemini-2.5")
+        || bare.starts_with("gemini-2.0")
+        || bare.starts_with("gemini-1.5")
+    {
+        return Some(1_048_576);
+    }
+    if bare.starts_with("claude-sonnet-4")
+        || bare.starts_with("claude-opus-4")
+        || bare.starts_with("claude-haiku-4")
+        || bare.starts_with("claude-3-7")
+        || bare.starts_with("claude-3-5")
+        || bare.starts_with("claude-3-")
+    {
+        return Some(200_000);
+    }
+    if bare.starts_with("gpt-5") {
+        return Some(400_000);
+    }
+    if bare.starts_with("gpt-4.1") {
+        return Some(1_047_576);
+    }
+    if bare.starts_with("gpt-4o")
+        || bare.starts_with("gpt-4-turbo")
+        || bare.starts_with("chatgpt-4o")
+        || bare.starts_with("o1-mini")
+        || bare.starts_with("o1-preview")
+    {
+        return Some(128_000);
+    }
+    if matches_reasoning_prefix(bare, "o1")
+        || matches_reasoning_prefix(bare, "o3")
+        || matches_reasoning_prefix(bare, "o4")
+    {
+        return Some(200_000);
+    }
+    None
+}
+
+fn matches_reasoning_prefix(model: &str, prefix: &str) -> bool {
+    model == prefix
+        || model
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with(['-', '.', '_']))
+}
 
 pub fn default_test_globs() -> Vec<String> {
     vec![
@@ -143,7 +230,8 @@ pub fn provider_from_preset(name: &str) -> Option<ProviderConfig> {
         api_key_env: preset.api_key_env.into(),
         connector: Some(preset.name.into()),
         model: preset.default_model.into(),
-        context_window: 32_000,
+        context_window: model_context_window(preset.default_model)
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW),
         max_rpm: None,
         extra_body: Default::default(),
     })
@@ -280,6 +368,25 @@ pub fn preset(name: &str) -> Option<&'static Preset> {
 }
 
 impl ProviderConfig {
+    /// Effective context window and where it came from (`config`, `model`, or `default`).
+    /// An omitted (`0`) or legacy placeholder (`32_000`) config value defers to the model table.
+    pub fn effective_context_window(&self) -> (u64, ContextWindowSource) {
+        let model_window = model_context_window(&self.model);
+        if self.context_window == 0 || self.context_window == DEFAULT_CONTEXT_WINDOW {
+            if let Some(w) = model_window {
+                return (w, ContextWindowSource::Model);
+            }
+            if self.context_window == 0 {
+                return (DEFAULT_CONTEXT_WINDOW, ContextWindowSource::Default);
+            }
+            return (DEFAULT_CONTEXT_WINDOW, ContextWindowSource::Config);
+        }
+        if model_window == Some(self.context_window) {
+            return (self.context_window, ContextWindowSource::Model);
+        }
+        (self.context_window, ContextWindowSource::Config)
+    }
+
     /// A config that points at a known provider's URL but names no connector gets that
     /// provider's connector, so keys stored with /connect or `auth login` are found.
     pub fn infer_connector(&mut self) {
@@ -415,7 +522,10 @@ fn claude_supports_thinking(model: &str) -> bool {
 
 #[cfg(test)]
 mod thinking_tests {
-    use super::claude_supports_thinking;
+    use super::{
+        claude_supports_thinking, model_context_window, provider_from_preset, ContextWindowSource,
+        ProviderConfig, ProviderKind, DEFAULT_CONTEXT_WINDOW,
+    };
 
     #[test]
     fn only_claude_3_7_and_newer_support_thinking() {
@@ -438,5 +548,63 @@ mod thinking_tests {
         ] {
             assert!(!claude_supports_thinking(model), "{model}");
         }
+    }
+
+    #[test]
+    fn preset_models_resolve_real_context_windows() {
+        let nim = provider_from_preset("nim").unwrap();
+        assert_eq!(nim.context_window, 131_072);
+        assert_eq!(
+            nim.effective_context_window(),
+            (131_072, ContextWindowSource::Model)
+        );
+        assert!(!crate::discipline::compaction::should_compact(
+            10_000,
+            nim.effective_context_window().0
+        ));
+
+        assert_eq!(
+            model_context_window("gemini-3-flash-preview"),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            model_context_window("claude-sonnet-4-20250514"),
+            Some(200_000)
+        );
+        assert_eq!(model_context_window("gpt-4o"), Some(128_000));
+        assert_eq!(model_context_window("gpt-5"), Some(400_000));
+        assert_eq!(model_context_window("unknown/custom-model"), None);
+    }
+
+    #[test]
+    fn unknown_model_keeps_explicit_config_window_and_omitted_uses_default() {
+        let mut p = ProviderConfig {
+            kind: ProviderKind::OpenaiCompat,
+            base_url: String::new(),
+            api_key_env: String::new(),
+            connector: None,
+            model: "custom-model".into(),
+            context_window: 65_536,
+            max_rpm: None,
+            extra_body: Default::default(),
+        };
+        assert_eq!(
+            p.effective_context_window(),
+            (65_536, ContextWindowSource::Config)
+        );
+
+        p.context_window = 0;
+        assert_eq!(
+            p.effective_context_window(),
+            (DEFAULT_CONTEXT_WINDOW, ContextWindowSource::Default)
+        );
+
+        // Legacy 32k preset config defers to known model table.
+        p.model = "nvidia/nemotron-3.5-super-vl-120b-a12b".into();
+        p.context_window = DEFAULT_CONTEXT_WINDOW;
+        assert_eq!(
+            p.effective_context_window(),
+            (131_072, ContextWindowSource::Model)
+        );
     }
 }

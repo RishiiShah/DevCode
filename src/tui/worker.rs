@@ -48,6 +48,8 @@ pub enum Ev {
     Info(Vec<String>),
     /// Provider label and context window after a connect, reload or switch.
     Provider(String, Option<u64>),
+    /// Source of the active context window (`config`, `model`, `default`).
+    ContextSource(Option<&'static str>),
     Models(Result<Vec<String>, String>),
     /// Effort values the current model accepts (empty: none).
     Efforts(Vec<String>),
@@ -138,15 +140,25 @@ pub fn spawn(
     })
 }
 
+fn emit_provider(session: &Session, events: &Sender<Ev>) {
+    let _ = events.send(Ev::Provider(
+        session.provider_label(),
+        session.context_window(),
+    ));
+    let _ = events.send(Ev::ContextSource(session.context_window_source()));
+}
+
 fn switched(
     session: &Session,
     result: Result<Option<String>, crate::DevCodeError>,
     events: &Sender<Ev>,
 ) {
-    let _ = events.send(match result {
-        Ok(_) => Ev::Provider(session.provider_label(), session.context_window()),
-        Err(e) => Ev::Failed(e.to_string()),
-    });
+    match result {
+        Ok(_) => emit_provider(session, events),
+        Err(e) => {
+            let _ = events.send(Ev::Failed(e.to_string()));
+        }
+    }
 }
 
 /// After connect / provider switch / reload, fetch the catalog so `/model` is ready
@@ -177,10 +189,7 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
             let result = session.connect_with(name.as_deref(), true, move || Ok(key));
             match result {
                 Ok(()) => {
-                    let _ = events.send(Ev::Provider(
-                        session.provider_label(),
-                        session.context_window(),
-                    ));
+                    emit_provider(session, events);
                     prefetch_models(session, events);
                 }
                 Err(e) => {
@@ -230,10 +239,7 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
         }
         Cmd::Reload => match session.reload(cli) {
             Ok(()) => {
-                let _ = events.send(Ev::Provider(
-                    session.provider_label(),
-                    session.context_window(),
-                ));
+                emit_provider(session, events);
                 prefetch_if_ready(session, events);
             }
             Err(e) => {
@@ -252,10 +258,7 @@ fn handle(session: &mut Session, cli: &Cli, cmd: Cmd, events: &Sender<Ev>) {
         }
         Cmd::SetProvider(name) => match session.set_provider(&name) {
             Ok(_) => {
-                let _ = events.send(Ev::Provider(
-                    session.provider_label(),
-                    session.context_window(),
-                ));
+                emit_provider(session, events);
                 prefetch_if_ready(session, events);
             }
             Err(e) => {
