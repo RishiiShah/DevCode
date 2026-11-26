@@ -228,3 +228,119 @@ fn base_url_with_v1_suffix_does_not_double() {
     assert!(raw.contains("POST /v1/messages "));
     assert!(!raw.contains("POST /v1/v1/messages "));
 }
+
+#[test]
+fn request_body_uses_object_tool_choice_and_omits_when_no_tools() {
+    let model = Anthropic::new(config("http://localhost".into())).unwrap();
+    let with_tools = model.request_body(&tool_request(), None).unwrap();
+    assert_eq!(
+        with_tools["tool_choice"],
+        serde_json::json!({"type": "auto"})
+    );
+    assert!(with_tools["tools"].as_array().is_some_and(|a| a.len() == 1));
+
+    let no_tools_req = Request {
+        system_prompt: String::new(),
+        messages: vec![Message::user("hi")],
+        tools: vec![],
+    };
+    let without_tools = model.request_body(&no_tools_req, None).unwrap();
+    assert!(without_tools.get("tools").is_none(), "{without_tools}");
+    assert!(
+        without_tools.get("tool_choice").is_none(),
+        "{without_tools}"
+    );
+}
+
+#[test]
+fn system_prompt_is_sent_as_is_with_api_key_auth() {
+    let reply =
+        r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+    let (url, requests) = scripted_server(vec![(200, reply.into())]);
+    std::env::set_var("M20_ANTHROPIC_SYS_KEY", "sk-ant-oat-test-token-123");
+    let mut cfg = config(url);
+    cfg.api_key_env = "M20_ANTHROPIC_SYS_KEY".into();
+    let req = Request {
+        system_prompt: "repo rules".into(),
+        messages: vec![Message::user("hi")],
+        tools: vec![],
+    };
+    Anthropic::new(cfg).unwrap().complete(&req).unwrap();
+    std::env::remove_var("M20_ANTHROPIC_SYS_KEY");
+
+    let captured = requests.lock().unwrap();
+    let raw = String::from_utf8_lossy(&captured[0]);
+    let headers = raw.split("\r\n\r\n").next().unwrap().to_ascii_lowercase();
+    assert!(headers.contains("x-api-key: sk-ant-oat-test-token-123"));
+    assert!(!headers.contains("authorization:"));
+    assert!(!headers.contains("anthropic-beta:"));
+    let body: serde_json::Value =
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["system"], "repo rules");
+}
+
+#[test]
+fn reasoning_effort_maps_to_anthropic_thinking_and_interleaved_beta() {
+    let reply =
+        r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+    let (url, requests) = scripted_server(vec![(200, reply.into())]);
+    let mut cfg = config(url);
+    cfg.extra_body
+        .insert("reasoning_effort".into(), serde_json::json!("medium"));
+    Anthropic::new(cfg)
+        .unwrap()
+        .complete(&tool_request())
+        .unwrap();
+    let captured = requests.lock().unwrap();
+    let raw = String::from_utf8_lossy(&captured[0]);
+    let headers = raw.split("\r\n\r\n").next().unwrap().to_ascii_lowercase();
+    assert!(headers.contains("anthropic-beta: interleaved-thinking-2025-05-14"));
+    let body: serde_json::Value =
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert!(body.get("reasoning_effort").is_none(), "{body}");
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({"type": "enabled", "budget_tokens": 4096})
+    );
+    assert_eq!(body["max_tokens"], 8192);
+}
+
+#[test]
+fn thinking_blocks_replay_ahead_of_tool_use_only_when_effort_set() {
+    let first = r#"{"content":[{"type":"thinking","thinking":"plan","signature":"SIG-1"},{"type":"redacted_thinking","data":"ENC"},{"type":"tool_use","id":"tu_1","name":"read","input":{"path":"a"}}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+    let second = r#"{"content":[{"type":"text","text":"done"}],"usage":{"input_tokens":2,"output_tokens":1}}"#;
+    let (url, requests) = scripted_server(vec![(200, first.into()), (200, second.into())]);
+    let mut cfg = config(url.clone());
+    cfg.extra_body
+        .insert("reasoning_effort".into(), serde_json::json!("low"));
+    let model = Anthropic::new(cfg).unwrap();
+    let first_response = model.complete(&tool_request()).unwrap();
+    let mut follow_up = tool_request();
+    follow_up
+        .messages
+        .push(Message::assistant("", first_response.tool_calls.clone()));
+    follow_up
+        .messages
+        .push(Message::tool("file contents", "tu_1"));
+    model.complete(&follow_up).unwrap();
+    let captured = requests.lock().unwrap();
+    let raw = String::from_utf8_lossy(captured.last().unwrap());
+    let json: serde_json::Value =
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let content = &json["messages"][0]["content"];
+    assert_eq!(
+        content[0],
+        serde_json::json!({"type": "thinking", "thinking": "plan", "signature": "SIG-1"})
+    );
+    assert_eq!(
+        content[1],
+        serde_json::json!({"type": "redacted_thinking", "data": "ENC"})
+    );
+    assert_eq!(content[2]["type"], "tool_use");
+    assert_eq!(content.as_array().unwrap().len(), 3);
+
+    let plain = Anthropic::new(config(url)).unwrap();
+    let body = plain.request_body(&follow_up, None).unwrap();
+    assert_eq!(body["messages"][0]["content"][0]["type"], "tool_use");
+    assert!(body.get("thinking").is_none());
+}

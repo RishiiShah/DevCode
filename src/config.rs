@@ -292,41 +292,74 @@ impl ProviderConfig {
         }
     }
 
-    /// Reasoning-effort values this model accepts on the Gemini endpoint; empty when none.
-    /// Taken from Google's OpenAI-compatibility table (cached copies disagree); not verified live.
+    /// Reasoning-effort values this model accepts; empty when none.
     /// Unknown models get none rather than a guess that could produce a 400.
     pub fn effort_levels(&self) -> Vec<&'static str> {
         if !self.supports_effort() {
             return Vec::new();
         }
         let m = self.model.as_str();
-        let flash = m.contains("flash");
-        let pro = m.contains("pro");
-        if m.starts_with("gemini-3") {
-            if pro {
-                vec!["low", "high"]
-            } else if flash {
-                vec!["minimal", "low", "medium", "high"]
+        if self.connector.as_deref() == Some("gemini")
+            || self.base_url.contains("generativelanguage.googleapis.com")
+            || self.base_url.contains("cloudcode-pa.googleapis.com")
+        {
+            let flash = m.contains("flash");
+            let pro = m.contains("pro");
+            if m.starts_with("gemini-3") {
+                if pro {
+                    vec!["low", "high"]
+                } else if flash {
+                    vec!["minimal", "low", "medium", "high"]
+                } else {
+                    Vec::new()
+                }
+            } else if m.starts_with("gemini-2.5") {
+                if pro {
+                    vec!["low", "medium", "high"]
+                } else if flash {
+                    vec!["none", "low", "medium", "high"]
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             }
-        } else if m.starts_with("gemini-2.5") {
-            if pro {
+        } else if self.kind == ProviderKind::Anthropic
+            || self.connector.as_deref() == Some("anthropic")
+        {
+            if claude_supports_thinking(m) {
                 vec!["low", "medium", "high"]
-            } else if flash {
-                vec!["none", "low", "medium", "high"]
             } else {
                 Vec::new()
             }
+        } else if m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4")
+            || m.starts_with("gpt-5")
+            || m.contains("/o1")
+            || m.contains("/o3")
+            || m.contains("/o4")
+            || m.contains("/gpt-5")
+            || claude_supports_thinking(m)
+        {
+            vec!["low", "medium", "high"]
         } else {
             Vec::new()
         }
     }
 
-    /// True when the backend takes `reasoning_effort` on chat completions (Gemini's endpoint).
+    /// True when the backend supports `/effort` reasoning controls.
     pub fn supports_effort(&self) -> bool {
         self.connector.as_deref() == Some("gemini")
             || self.base_url.contains("generativelanguage.googleapis.com")
+            || self.base_url.contains("cloudcode-pa.googleapis.com")
+            || self.kind == ProviderKind::Anthropic
+            || matches!(
+                self.connector.as_deref(),
+                Some("anthropic" | "openai" | "openrouter")
+            )
+            || self.base_url.contains("api.openai.com")
+            || self.base_url.contains("openrouter.ai")
     }
 
     /// Apply a named preset's connector, URL, and key env. Keeps a custom model unless
@@ -367,4 +400,43 @@ fn deserialize_extra_body<'de, D: serde::Deserializer<'de>>(
         ));
     }
     Ok(body)
+}
+
+/// Extended thinking exists from Claude 3.7 onward; older Claude models reject `thinking`.
+fn claude_supports_thinking(model: &str) -> bool {
+    if !model.contains("claude-") {
+        return false;
+    }
+    let legacy = model.contains("claude-instant")
+        || model.contains("claude-2")
+        || (model.contains("claude-3") && !model.contains("claude-3-7"));
+    !legacy
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::claude_supports_thinking;
+
+    #[test]
+    fn only_claude_3_7_and_newer_support_thinking() {
+        for model in [
+            "claude-3-7-sonnet-latest",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-1",
+            "anthropic/claude-sonnet-4",
+            "claude-haiku-4-5",
+        ] {
+            assert!(claude_supports_thinking(model), "{model}");
+        }
+        for model in [
+            "claude-3-haiku-20240307",
+            "claude-3-5-sonnet-latest",
+            "anthropic/claude-3-opus",
+            "claude-2.1",
+            "claude-instant-1.2",
+            "gpt-5",
+        ] {
+            assert!(!claude_supports_thinking(model), "{model}");
+        }
+    }
 }

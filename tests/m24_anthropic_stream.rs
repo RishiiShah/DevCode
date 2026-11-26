@@ -1,5 +1,5 @@
 use devcode::agent::anthropic::Anthropic;
-use devcode::agent::model::{Model, ModelError, Request, ToolSchema};
+use devcode::agent::model::{Message, Model, ModelError, Request, ToolSchema};
 use devcode::config::{ProviderConfig, ProviderKind};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -615,4 +615,179 @@ fn stream_http_400_falls_back_once() {
     assert_eq!(captured.len(), 2);
     assert_eq!(request_json(&captured[0])["stream"], true);
     assert_eq!(request_json(&captured[1])["stream"], false);
+}
+
+#[test]
+fn stream_emits_thinking_deltas_as_reasoning_chunks() {
+    use devcode::agent::StreamChunk;
+    const KEY: &str = "ant-think-secret";
+    std::env::set_var("M24_ANTHROPIC_REASON_KEY", KEY);
+    let events = vec![
+        sse(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "plan ant-think-"}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "secret ok"}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "text_delta", "text": "visible"}
+            }),
+        ),
+        sse("message_stop", json!({"type": "message_stop"})),
+    ];
+    let (url, _) = spawn_sse(events);
+    let mut cfg = config(url);
+    cfg.api_key_env = "M24_ANTHROPIC_REASON_KEY".into();
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let response = Anthropic::new(cfg)
+        .unwrap()
+        .complete_stream_cancellable(&text_request(), None, &mut |chunk| match chunk {
+            StreamChunk::Text(s) => text.push_str(s),
+            StreamChunk::Reasoning(s) => {
+                assert!(!s.contains(KEY), "key leaked in reasoning {s:?}");
+                reasoning.push_str(s);
+            }
+        })
+        .unwrap();
+    std::env::remove_var("M24_ANTHROPIC_REASON_KEY");
+    assert_eq!(text, "visible");
+    assert_eq!(response.text.as_deref(), Some("visible"));
+    assert_eq!(reasoning, "plan [REDACTED] ok");
+}
+
+#[test]
+fn cancel_aborts_stalled_anthropic_stream_immediately() {
+    use devcode::agent::CancelToken;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        write_sse_headers(&mut stream);
+        write_chunk(
+            &mut stream,
+            &sse(
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "first"}
+                }),
+            ),
+        );
+        let _ = ready_tx.send(());
+        thread::sleep(Duration::from_secs(5));
+    });
+    let cancel = CancelToken::new();
+    let cancel_thread = cancel.clone();
+    thread::spawn(move || {
+        let _ = ready_rx.recv();
+        thread::sleep(Duration::from_millis(20));
+        cancel_thread.cancel();
+    });
+    let start = Instant::now();
+    let err = Anthropic::new(config(format!("http://{address}")))
+        .unwrap()
+        .complete_stream_cancellable(&text_request(), Some(&cancel), &mut |_| {})
+        .unwrap_err();
+    let elapsed = start.elapsed();
+    assert!(matches!(err, ModelError::Cancelled), "got {err}");
+    assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
+}
+
+#[test]
+fn stream_keeps_thinking_signature_for_tool_turn_replay() {
+    let events = vec![
+        sse(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "step "}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "one"}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "SIG-BLOB"}
+            }),
+        ),
+        sse(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "tu_a", "name": "read"}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{}"}
+            }),
+        ),
+        sse("message_stop", json!({"type": "message_stop"})),
+    ];
+    let (url, _) = spawn_sse(events);
+    let mut cfg = config(url);
+    cfg.extra_body
+        .insert("reasoning_effort".into(), json!("high"));
+    let model = Anthropic::new(cfg).unwrap();
+    let (response, _) = stream_text(&model, &tool_request());
+    assert_eq!(response.tool_calls.len(), 1);
+    let mut follow_up = tool_request();
+    follow_up
+        .messages
+        .push(Message::assistant("", response.tool_calls));
+    follow_up.messages.push(Message::tool("ok", "tu_a"));
+    let body = model.request_body(&follow_up, None).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        json!({"type": "thinking", "thinking": "step one", "signature": "SIG-BLOB"})
+    );
+    assert_eq!(body["messages"][0]["content"][1]["type"], "tool_use");
 }

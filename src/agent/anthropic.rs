@@ -1,9 +1,13 @@
-use super::model::{Message, Model, ModelError, Request, Response, Role, ToolCall, Usage};
-use super::sse::{RedactTail, SseParser};
+use super::model::{
+    CancelToken, Message, Model, ModelError, Request, Response, Role, StreamChunk, ToolCall, Usage,
+    ANTHROPIC_THINKING_TAG,
+};
+use super::sse::{
+    drive_ureq_response, sleep_cancellable, spawn_http_json, HttpEvent, RedactTail, SseParser,
+};
 use crate::config::ProviderConfig;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -31,8 +35,11 @@ struct ToolSlot {
 
 struct StreamState {
     tail: RedactTail,
+    reasoning_tail: RedactTail,
     text: String,
     tools: BTreeMap<u64, ToolSlot>,
+    /// Thinking and redacted_thinking blocks by content index, rebuilt from deltas.
+    thinking: BTreeMap<u64, Value>,
     input_tokens: u64,
     output_tokens: u64,
 }
@@ -41,8 +48,10 @@ impl StreamState {
     fn new(key: &str) -> Self {
         Self {
             tail: RedactTail::new(key),
+            reasoning_tail: RedactTail::new(key),
             text: String::new(),
             tools: BTreeMap::new(),
+            thinking: BTreeMap::new(),
             input_tokens: 0,
             output_tokens: 0,
         }
@@ -57,6 +66,7 @@ fn retry_pause(
     rate_attempts: &mut u32,
     server_attempts: &mut u32,
     retries: bool,
+    cancel: Option<&CancelToken>,
 ) -> Result<bool, ModelError> {
     let count = if code == 429 {
         *rate_attempts += 1;
@@ -69,9 +79,10 @@ fn retry_pause(
     };
     let limit = if code == 429 { 5 } else { 2 };
     if retries && count > 0 && count <= limit {
-        std::thread::sleep(Duration::from_secs(
-            retry_after.unwrap_or(1u64 << (count - 1)),
-        ));
+        sleep_cancellable(
+            cancel,
+            Duration::from_secs(retry_after.unwrap_or(1u64 << (count - 1))),
+        )?;
         return Ok(true);
     }
     if code == 429 && retries {
@@ -163,22 +174,29 @@ impl Anthropic {
         }
     }
 
-    fn pace(&self) -> Result<(), ModelError> {
+    fn pace(&self, cancel: Option<&CancelToken>) -> Result<(), ModelError> {
         if let Some(rpm) = self.config.max_rpm {
-            let mut last = self
-                .last_request
-                .lock()
-                .map_err(|e| ModelError::Other(e.to_string()))?;
-            let interval = Duration::from_secs_f64(60.0 / f64::from(rpm));
-            if let Some(previous) = *last {
-                std::thread::sleep(interval.saturating_sub(previous.elapsed()));
-            }
-            *last = Some(Instant::now());
+            let wait = {
+                let mut last = self
+                    .last_request
+                    .lock()
+                    .map_err(|e| ModelError::Other(e.to_string()))?;
+                let interval = Duration::from_secs_f64(60.0 / f64::from(rpm));
+                let wait = last
+                    .map(|previous| interval.saturating_sub(previous.elapsed()))
+                    .unwrap_or(Duration::ZERO);
+                *last = Some(Instant::now());
+                wait
+            };
+            sleep_cancellable(cancel, wait)?;
         }
         Ok(())
     }
 
-    fn anthropic_messages(messages: &[Message]) -> Result<Vec<Value>, ModelError> {
+    fn anthropic_messages(
+        messages: &[Message],
+        include_thinking: bool,
+    ) -> Result<Vec<Value>, ModelError> {
         let mut out = Vec::new();
         let mut index = 0;
         while index < messages.len() {
@@ -192,6 +210,11 @@ impl Anthropic {
                 }
                 Role::Assistant => {
                     let mut blocks = Vec::new();
+                    // Anthropic requires the turn's thinking blocks, signatures intact, ahead of
+                    // `tool_use` when thinking is enabled.
+                    if include_thinking {
+                        blocks.extend(stored_thinking(&message.tool_calls));
+                    }
                     if !message.content.is_empty() {
                         blocks.push(json!({"type": "text", "text": message.content}));
                     }
@@ -206,7 +229,9 @@ impl Anthropic {
                             "input": input,
                         }));
                     }
-                    out.push(json!({"role": "assistant", "content": blocks}));
+                    if !blocks.is_empty() {
+                        out.push(json!({"role": "assistant", "content": blocks}));
+                    }
                 }
                 Role::Tool => {
                     let mut blocks = Vec::new();
@@ -234,12 +259,22 @@ impl Anthropic {
         Ok(out)
     }
 
+    fn beta_header(&self, has_thinking: bool) -> Option<String> {
+        has_thinking.then(|| "interleaved-thinking-2025-05-14".to_owned())
+    }
+
     pub fn request_body(
         &self,
         req: &Request,
         max_tokens: Option<u32>,
     ) -> Result<Value, ModelError> {
-        let messages = Self::anthropic_messages(&req.messages)?;
+        let thinking_enabled = self
+            .config
+            .extra_body
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .is_some_and(|level| matches!(level, "low" | "medium" | "high"));
+        let messages = Self::anthropic_messages(&req.messages, thinking_enabled)?;
         let tools: Vec<_> = req
             .tools
             .iter()
@@ -251,19 +286,40 @@ impl Anthropic {
                 })
             })
             .collect();
+        let mut extra = self.config.extra_body.clone();
+        let effort_budget = extra
+            .remove("reasoning_effort")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .and_then(|level| match level.as_str() {
+                "low" => Some(1024u32),
+                "medium" => Some(4096u32),
+                "high" => Some(10000u32),
+                _ => None,
+            });
+        let base_max = max_tokens.unwrap_or(4096);
+        let effective_max = match effort_budget {
+            Some(budget) => base_max.max(budget + 4096),
+            None => base_max,
+        };
         let mut body = json!({
             "model": self.config.model,
-            "max_tokens": max_tokens.unwrap_or(4096),
+            "max_tokens": effective_max,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
             "stream": false,
         });
+        // Anthropic rejects `tool_choice` when no tools are declared, and requires an object.
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+            body["tool_choice"] = json!({"type": "auto"});
+        }
+        if let Some(budget) = effort_budget {
+            body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+        }
         if !req.system_prompt.is_empty() {
             body["system"] = json!(req.system_prompt);
         }
         if let Some(object) = body.as_object_mut() {
-            object.extend(self.config.extra_body.clone());
+            object.extend(extra);
         }
         Ok(body)
     }
@@ -275,6 +331,7 @@ impl Anthropic {
             .ok_or_else(|| ModelError::FormatError("missing message content".into()))?;
         let mut text_parts = Vec::new();
         let mut calls = Vec::new();
+        let mut thinking = Vec::new();
         for block in blocks {
             let kind = block
                 .get("type")
@@ -310,9 +367,11 @@ impl Anthropic {
                         thought_signature: None,
                     });
                 }
+                "thinking" | "redacted_thinking" => thinking.push(block.clone()),
                 _ => {}
             }
         }
+        attach_thinking(&mut calls, thinking)?;
         let text = if text_parts.is_empty() {
             None
         } else {
@@ -339,12 +398,15 @@ impl Anthropic {
         })
     }
 
-    fn apply_headers(&self, call: ureq::Request) -> ureq::Request {
+    fn apply_headers(&self, call: ureq::Request, beta: Option<&str>) -> ureq::Request {
         let mut call = call
             .set("anthropic-version", "2023-06-01")
             .set("content-type", "application/json");
         if !self.key.is_empty() {
             call = call.set("x-api-key", &self.key);
+        }
+        if let Some(beta) = beta {
+            call = call.set("anthropic-beta", beta);
         }
         call
     }
@@ -354,40 +416,66 @@ impl Anthropic {
         req: &Request,
         max_tokens: Option<u32>,
         retries: bool,
+        cancel: Option<&CancelToken>,
     ) -> Result<Response, ModelError> {
         let body = self.request_body(req, max_tokens)?;
+        let beta = self.beta_header(body.get("thinking").is_some());
         let url = format!("{}/messages", api_root(&self.config.base_url));
         let mut rate_attempts = 0u32;
         let mut server_attempts = 0u32;
         loop {
-            self.pace()?;
-            let call = self.apply_headers(self.client.post(&url));
-            match call.send_json(body.clone()) {
-                Ok(response) => {
-                    let value: Value = response
-                        .into_json()
-                        .map_err(|e| ModelError::FormatError(self.redact(&e.to_string())))?;
-                    return Self::parse_response(&value, req);
+            if cancel.is_some_and(CancelToken::is_cancelled) {
+                return Err(ModelError::Cancelled);
+            }
+            self.pace(cancel)?;
+            let client = self.client.clone();
+            let req_url = url.clone();
+            let key = self.key.clone();
+            let beta_val = beta.clone();
+            let payload = body.clone();
+            let rx = spawn_http_json(cancel, move |tx| {
+                let mut call = client
+                    .post(&req_url)
+                    .set("anthropic-version", "2023-06-01")
+                    .set("content-type", "application/json");
+                if !key.is_empty() {
+                    call = call.set("x-api-key", &key);
                 }
-                Err(ureq::Error::Status(code, response)) => {
-                    let retry_after = response
-                        .header("Retry-After")
-                        .and_then(|s| s.parse::<u64>().ok());
+                if let Some(b) = beta_val.as_deref() {
+                    call = call.set("anthropic-beta", b);
+                }
+                drive_ureq_response(call.send_json(payload), false, tx);
+            });
+            match rx.recv()? {
+                Some(HttpEvent::Json(value)) => return Self::parse_response(&value, req),
+                Some(HttpEvent::Status {
+                    code,
+                    retry_after,
+                    body: err_body,
+                }) => {
                     if retry_pause(
                         code,
                         retry_after,
                         &mut rate_attempts,
                         &mut server_attempts,
                         retries,
+                        cancel,
                     )? {
                         continue;
                     }
-                    let err_body = response.into_string().unwrap_or_default();
                     return Err(ModelError::Network(
                         self.redact(&format!("HTTP {code}: {err_body}")),
                     ));
                 }
-                Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
+                Some(HttpEvent::Format(err)) => {
+                    return Err(ModelError::FormatError(self.redact(&err)));
+                }
+                Some(HttpEvent::Transport(err)) => {
+                    return Err(ModelError::Network(self.redact(&err)));
+                }
+                Some(HttpEvent::Bytes(_)) | Some(HttpEvent::Eof) | None => {
+                    return Err(ModelError::Network("unexpected end of response".into()));
+                }
             }
         }
     }
@@ -395,89 +483,112 @@ impl Anthropic {
     fn complete_stream_inner(
         &self,
         req: &Request,
-        on_delta: &mut dyn FnMut(&str),
+        cancel: Option<&CancelToken>,
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
     ) -> Result<Response, ModelError> {
         let mut body = self.request_body(req, None)?;
         body["stream"] = json!(true);
+        let beta = self.beta_header(body.get("thinking").is_some());
         let url = format!("{}/messages", api_root(&self.config.base_url));
         let mut rate_attempts = 0u32;
         let mut server_attempts = 0u32;
         loop {
-            self.pace()?;
-            let call = self.apply_headers(self.client.post(&url));
-            match call.send_json(body.clone()) {
-                Ok(response) => return self.consume_success(response, req, on_delta),
+            if cancel.is_some_and(CancelToken::is_cancelled) {
+                return Err(ModelError::Cancelled);
+            }
+            self.pace(cancel)?;
+            let client = self.client.clone();
+            let req_url = url.clone();
+            let key = self.key.clone();
+            let beta_val = beta.clone();
+            let payload = body.clone();
+            let rx = spawn_http_json(cancel, move |tx| {
+                let mut call = client
+                    .post(&req_url)
+                    .set("anthropic-version", "2023-06-01")
+                    .set("content-type", "application/json");
+                if !key.is_empty() {
+                    call = call.set("x-api-key", &key);
+                }
+                if let Some(b) = beta_val.as_deref() {
+                    call = call.set("anthropic-beta", b);
+                }
+                drive_ureq_response(call.send_json(payload), true, tx);
+            });
+            match rx.recv()? {
+                Some(HttpEvent::Json(value)) => return Self::parse_response(&value, req),
                 // Status is known before any success-body byte. One non-streaming attempt.
-                Err(ureq::Error::Status(400, _)) => return self.complete(req),
-                Err(ureq::Error::Status(code, response)) => {
-                    let retry_after = response
-                        .header("Retry-After")
-                        .and_then(|header| header.parse::<u64>().ok());
+                Some(HttpEvent::Status { code: 400, .. }) => {
+                    return self.complete_cancellable(req, cancel);
+                }
+                Some(HttpEvent::Status {
+                    code,
+                    retry_after,
+                    body: err_body,
+                }) => {
                     if retry_pause(
                         code,
                         retry_after,
                         &mut rate_attempts,
                         &mut server_attempts,
                         true,
+                        cancel,
                     )? {
                         continue;
                     }
-                    let err_body = response.into_string().unwrap_or_default();
                     return Err(ModelError::Network(
                         self.redact(&format!("HTTP {code}: {err_body}")),
                     ));
                 }
-                Err(err) => return Err(ModelError::Network(self.redact(&err.to_string()))),
+                Some(HttpEvent::Format(err)) => {
+                    return Err(ModelError::FormatError(self.redact(&err)));
+                }
+                Some(HttpEvent::Transport(err)) => {
+                    return Err(ModelError::Network(self.redact(&err)));
+                }
+                Some(first) => {
+                    let mut parser = SseParser::new();
+                    let mut state = StreamState::new(&self.key);
+                    let mut done = false;
+                    let mut current = Some(first);
+                    while let Some(ev) = current {
+                        match ev {
+                            HttpEvent::Bytes(chunk) => {
+                                let proceed = parser.push(&chunk, &mut |name, data| {
+                                    self.on_sse_event(name, data, &mut state, on_chunk)
+                                })?;
+                                if !proceed {
+                                    done = true;
+                                    break;
+                                }
+                            }
+                            HttpEvent::Eof => break,
+                            HttpEvent::Transport(err) => {
+                                return Err(ModelError::Network(self.redact(&err)));
+                            }
+                            HttpEvent::Format(err) => {
+                                return Err(ModelError::FormatError(self.redact(&err)));
+                            }
+                            HttpEvent::Json(_) | HttpEvent::Status { .. } => break,
+                        }
+                        current = rx.recv()?;
+                    }
+                    if !done {
+                        parser.finish(&mut |name, data| {
+                            self.on_sse_event(name, data, &mut state, on_chunk)
+                        })?;
+                    }
+                    state
+                        .reasoning_tail
+                        .finish(&mut |piece| on_chunk(StreamChunk::Reasoning(piece)));
+                    state
+                        .tail
+                        .finish(&mut |piece| on_chunk(StreamChunk::Text(piece)));
+                    return self.assemble_stream(state, req);
+                }
+                None => return Err(ModelError::Network("unexpected end of response".into())),
             }
         }
-    }
-
-    fn consume_success(
-        &self,
-        response: ureq::Response,
-        req: &Request,
-        on_delta: &mut dyn FnMut(&str),
-    ) -> Result<Response, ModelError> {
-        if response
-            .content_type()
-            .trim()
-            .eq_ignore_ascii_case("text/event-stream")
-        {
-            return self.read_event_stream(response.into_reader(), req, on_delta);
-        }
-        let value: Value = response
-            .into_json()
-            .map_err(|e| ModelError::FormatError(self.redact(&e.to_string())))?;
-        Self::parse_response(&value, req)
-    }
-
-    fn read_event_stream(
-        &self,
-        mut reader: impl Read,
-        req: &Request,
-        on_delta: &mut dyn FnMut(&str),
-    ) -> Result<Response, ModelError> {
-        let mut parser = SseParser::new();
-        let mut state = StreamState::new(&self.key);
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(|e| ModelError::Network(self.redact(&e.to_string())))?;
-            let proceed = if n == 0 {
-                parser
-                    .finish(&mut |name, data| self.on_sse_event(name, data, &mut state, on_delta))?
-            } else {
-                parser.push(&buf[..n], &mut |name, data| {
-                    self.on_sse_event(name, data, &mut state, on_delta)
-                })?
-            };
-            if n == 0 || !proceed {
-                break;
-            }
-        }
-        state.tail.finish(on_delta);
-        self.assemble_stream(state, req)
     }
 
     fn on_sse_event(
@@ -485,7 +596,7 @@ impl Anthropic {
         name: &str,
         data: &str,
         state: &mut StreamState,
-        on_delta: &mut dyn FnMut(&str),
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
     ) -> Result<bool, ModelError> {
         if name == "ping" {
             return Ok(true);
@@ -521,7 +632,7 @@ impl Anthropic {
                 Ok(true)
             }
             "content_block_delta" => {
-                note_block_delta(&value, state, on_delta)?;
+                note_block_delta(&value, state, on_chunk)?;
                 Ok(true)
             }
             "message_delta" => {
@@ -564,6 +675,7 @@ impl Anthropic {
                 thought_signature: None,
             });
         }
+        attach_thinking(&mut calls, state.thinking.into_values().collect())?;
         let text = if state.text.is_empty() {
             None
         } else {
@@ -589,13 +701,18 @@ fn note_block_start(value: &Value, state: &mut StreamState) -> Result<(), ModelE
     let Some(block) = value.get("content_block") else {
         return Ok(());
     };
-    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+    let kind = block.get("type").and_then(Value::as_str);
+    if !matches!(kind, Some("tool_use" | "thinking" | "redacted_thinking")) {
         return Ok(());
     }
     let index = value
         .get("index")
         .and_then(Value::as_u64)
         .ok_or_else(|| ModelError::FormatError("missing content block index".into()))?;
+    if kind != Some("tool_use") {
+        state.thinking.insert(index, block.clone());
+        return Ok(());
+    }
     state.tools.insert(
         index,
         ToolSlot {
@@ -610,7 +727,7 @@ fn note_block_start(value: &Value, state: &mut StreamState) -> Result<(), ModelE
 fn note_block_delta(
     value: &Value,
     state: &mut StreamState,
-    on_delta: &mut dyn FnMut(&str),
+    on_chunk: &mut dyn FnMut(StreamChunk<'_>),
 ) -> Result<(), ModelError> {
     let delta = value.get("delta");
     match delta
@@ -624,7 +741,39 @@ fn note_block_delta(
                 .and_then(Value::as_str)
             {
                 state.text.push_str(piece);
-                state.tail.push(piece, on_delta);
+                state
+                    .tail
+                    .push(piece, &mut |s| on_chunk(StreamChunk::Text(s)));
+            }
+        }
+        "thinking_delta" => {
+            if let Some(piece) = delta
+                .and_then(|item| item.get("thinking"))
+                .and_then(Value::as_str)
+            {
+                if let Some(block) = value
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|index| state.thinking.get_mut(&index))
+                {
+                    append_str_field(block, "thinking", piece);
+                }
+                state
+                    .reasoning_tail
+                    .push(piece, &mut |s| on_chunk(StreamChunk::Reasoning(s)));
+            }
+        }
+        "signature_delta" => {
+            if let (Some(piece), Some(block)) = (
+                delta
+                    .and_then(|item| item.get("signature"))
+                    .and_then(Value::as_str),
+                value
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|index| state.thinking.get_mut(&index)),
+            ) {
+                append_str_field(block, "signature", piece);
             }
         }
         "input_json_delta" => {
@@ -647,13 +796,51 @@ fn note_block_delta(
     Ok(())
 }
 
+fn append_str_field(block: &mut Value, field: &str, piece: &str) {
+    let current = block.get(field).and_then(Value::as_str).unwrap_or_default();
+    block[field] = json!(format!("{current}{piece}"));
+}
+
+/// Stores a turn's thinking blocks on its first tool call so they can be replayed with it.
+/// Turns without tool calls drop them: Anthropic only requires them ahead of `tool_use`.
+fn attach_thinking(calls: &mut [ToolCall], thinking: Vec<Value>) -> Result<(), ModelError> {
+    if thinking.is_empty() {
+        return Ok(());
+    }
+    if let Some(first) = calls.first_mut() {
+        let raw =
+            serde_json::to_string(&thinking).map_err(|e| ModelError::FormatError(e.to_string()))?;
+        first.thought_signature = Some(format!("{ANTHROPIC_THINKING_TAG}{raw}"));
+    }
+    Ok(())
+}
+
+/// Thinking blocks stored by `attach_thinking` on an assistant turn's tool calls.
+fn stored_thinking(calls: &[ToolCall]) -> Vec<Value> {
+    calls
+        .iter()
+        .filter_map(|call| call.thought_signature.as_deref())
+        .filter_map(|sig| sig.strip_prefix(ANTHROPIC_THINKING_TAG))
+        .filter_map(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
+        .flatten()
+        .collect()
+}
+
 impl Model for Anthropic {
     fn redact_sensitive(&self, text: &str) -> String {
         self.redact(text)
     }
 
     fn complete(&self, req: &Request) -> Result<Response, ModelError> {
-        self.complete_inner(req, None, true)
+        self.complete_cancellable(req, None)
+    }
+
+    fn complete_cancellable(
+        &self,
+        req: &Request,
+        cancel: Option<&CancelToken>,
+    ) -> Result<Response, ModelError> {
+        self.complete_inner(req, None, true, cancel)
     }
 
     fn complete_stream(
@@ -661,12 +848,26 @@ impl Model for Anthropic {
         req: &Request,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<Response, ModelError> {
-        self.complete_stream_inner(req, on_delta)
+        self.complete_stream_cancellable(req, None, &mut |chunk| {
+            if let StreamChunk::Text(piece) = chunk {
+                on_delta(piece);
+            }
+        })
+    }
+
+    fn complete_stream_cancellable(
+        &self,
+        req: &Request,
+        cancel: Option<&CancelToken>,
+        on_chunk: &mut dyn FnMut(StreamChunk<'_>),
+    ) -> Result<Response, ModelError> {
+        self.complete_stream_inner(req, cancel, on_chunk)
     }
 
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
         let url = format!("{}/models", api_root(&self.config.base_url));
-        let call = self.apply_headers(self.client.get(&url));
+        let beta = self.beta_header(false);
+        let call = self.apply_headers(self.client.get(&url), beta.as_deref());
         let value: Value = match call.call() {
             Ok(response) => response
                 .into_json()
