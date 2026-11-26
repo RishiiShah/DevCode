@@ -58,7 +58,7 @@ devcode --profile build "fix the bug in calc.py"         # edits with approval, 
 devcode rollback                                         # undo the whole latest run
 ```
 
-Run `devcode` with no prompt in a terminal to open the full-screen interface: live transcript, diff approvals in a modal, masked key entry, and slash commands (`/help`, `/init <preset>`, `/connect`, `/connections` (stored|env|missing), `/provider`, `/model` (catalog auto-fetches on connect/provider switch; filterable), `/effort` (Gemini), `/ask`, `/plan`, `/build`, `/rollback`). `--plain` keeps the line-based REPL (no streaming). The TUI streams assistant text as it arrives (OpenAI-compatible and Anthropic SSE); set `DEVCODE_STREAM=0` to turn that off. Ctrl-C cannot yet cancel a request mid-stream. With no `verification.test_command` configured, build runs finish marked UNVERIFIED instead of looping.
+Run `devcode` with no prompt in a terminal to open the full-screen interface: live transcript, diff approvals in a modal, masked key entry, and slash commands (`/help`, `/init <preset>`, `/connect`, `/connections` (stored|env|missing), `/provider`, `/model` (catalog auto-fetches on connect/provider switch; filterable), `/effort` (Gemini, Anthropic, OpenAI/OpenRouter reasoning models), `/ask`, `/plan`, `/build`, `/rollback`). `--plain` keeps the line-based REPL (no streaming). The TUI streams assistant text and reasoning deltas as they arrive (OpenAI-compatible, Code Assist, and Anthropic SSE); set `DEVCODE_STREAM=0` to turn that off. Pressing Ctrl-C once cancels an in-flight request or command; pressing twice quits. With no `verification.test_command` configured, build runs finish marked UNVERIFIED instead of looping.
 
 `--trace` writes per-step timing and token counts (no file contents) to `.devcode/trace.jsonl`. Do not paste input while `devcode` runs: approval prompts read stdin. Live results and limits: [`docs/research/first-live-runs.md`](docs/research/first-live-runs.md).
 
@@ -70,7 +70,7 @@ Shell commands stop after 120 seconds. Long-running servers use the `start_proce
 devcode auth login nim            # hidden prompt; or --with-stdin
 devcode auth login nim:work       # named slot (one colon, alias [A-Za-z0-9_-]+)
 devcode auth switch nim:work      # select the stored key; beats the env var for that connector
-devcode auth login gemini --oauth # Google paste-code login -> oauth-gemini.json (not used by requests yet)
+devcode auth login gemini --oauth # Google browser/loopback OAuth (or NO_BROWSER=1 paste-code) -> oauth-gemini.json (Code Assist)
 devcode auth list | logout NAME
 ```
 
