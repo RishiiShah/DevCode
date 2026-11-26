@@ -227,6 +227,14 @@ fn test_lexical_guard_table_test_25_cases() {
             "python3 -c \"open('src/lib.rs', 'w').write('foo')\"",
             "Allowed",
         ),
+        // Dependency manifests cannot be created or overwritten via shell redirections/tools,
+        // even when they do not yet exist in the guard set.
+        (
+            "cat > package.json << 'EOF'\n{\"name\":\"app\"}\nEOF",
+            "Denied",
+        ),
+        ("echo '[dependencies]' > Cargo.toml", "Denied"),
+        ("echo 'requests' | tee requirements.txt", "Denied"),
     ];
 
     assert!(

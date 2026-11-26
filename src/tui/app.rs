@@ -531,7 +531,7 @@ impl App {
             }
         }
         self.items.push(Item::Note(format!(
-            "Resumed conversation · {prompts} {}. Continue where you left off.",
+            "Resumed conversation · {}. Continue where you left off.",
             plural(prompts, "prompt", "prompts")
         )));
     }
@@ -2539,7 +2539,10 @@ mod tests {
             .items
             .iter()
             .any(|i| matches!(i, Item::Assistant(t) if t == "done")));
-        assert!(matches!(a.items.last(), Some(Item::Note(t)) if t.contains("1 prompt")));
+        assert!(matches!(
+            a.items.last(),
+            Some(Item::Note(t)) if t.contains("1 prompt") && !t.contains("1 1 prompt")
+        ));
     }
 
     #[test]

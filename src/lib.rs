@@ -215,6 +215,7 @@ impl Session {
         self.total_in = 0;
         self.total_out = 0;
         self.context_used = 0;
+        self.tools.clear_scope();
     }
 
     /// Deterministically compacts the active conversation history (`/compact`) without an LLM call.
@@ -412,6 +413,7 @@ impl Session {
         self.total_in = loaded.total_in;
         self.total_out = loaded.total_out;
         self.context_used = loaded.context_used;
+        self.tools.restore_scope_from_messages(&loaded.messages);
         Ok(loaded)
     }
     /// Re-reads `.devcode.json` and rebuilds the model; keeps tools and approval state.

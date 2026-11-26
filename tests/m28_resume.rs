@@ -280,3 +280,76 @@ fn session_compact_and_export_markdown() {
         .content
         .contains("HARNESS DETERMINISTIC COMPACTION SUMMARY")));
 }
+
+#[test]
+fn resume_restores_declared_scope_for_next_edit() {
+    use devcode::agent::ToolCall;
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("hero.tsx"), "old\n").unwrap();
+
+    let first_model = ScriptedModel::new(vec![
+        Ok(Response {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "s1".into(),
+                thought_signature: None,
+                name: "declare_scope".into(),
+                arguments: json!({"files": ["hero.tsx"], "reason": "style"}).to_string(),
+            }],
+            usage: Usage::default(),
+        }),
+        Ok(Response {
+            text: Some("declared".into()),
+            tool_calls: Vec::new(),
+            usage: Usage::default(),
+        }),
+    ]);
+    let mut first = Session::new(
+        dir.path().to_path_buf(),
+        Config::default(),
+        Profile::Build,
+        Box::new(first_model),
+        devcode::tools::registry(dir.path().to_path_buf(), true),
+    );
+    first.prompt("prepare").unwrap();
+
+    // New session resumes and edits hero.tsx directly without re-calling declare_scope.
+    let second_model = ScriptedModel::new(vec![
+        Ok(Response {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "e1".into(),
+                thought_signature: None,
+                name: "edit_file".into(),
+                arguments: json!({
+                    "path": "hero.tsx",
+                    "old_string": "old",
+                    "new_string": "new"
+                })
+                .to_string(),
+            }],
+            usage: Usage::default(),
+        }),
+        Ok(Response {
+            text: Some("updated".into()),
+            tool_calls: Vec::new(),
+            usage: Usage::default(),
+        }),
+    ]);
+    let mut second = Session::new(
+        dir.path().to_path_buf(),
+        Config::default(),
+        Profile::Build,
+        Box::new(second_model),
+        devcode::tools::registry(dir.path().to_path_buf(), true),
+    );
+    second.resume("").unwrap();
+    let run = second.prompt("continue").unwrap();
+    assert_eq!(run.exit_reason, devcode::agent::ExitReason::Completed);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("hero.tsx")).unwrap(),
+        "new\n"
+    );
+}

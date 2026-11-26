@@ -162,7 +162,8 @@ pub fn is_protected_path(target: &str, root: &Path, guard_set: &[PathBuf]) -> bo
     }
 
     let target_path = Path::new(clean_target);
-    if is_devcode_path(root, target_path) {
+    if is_devcode_path(root, target_path) || crate::discipline::is_dependency_manifest(target_path)
+    {
         return true;
     }
 

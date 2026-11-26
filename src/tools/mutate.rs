@@ -19,7 +19,7 @@ pub struct MutationContext {
     pub(crate) prompt: ApprovalPrompt<Box<dyn BufRead + Send>, Box<dyn Write + Send>>,
     pub(crate) log: ToolLog,
     pub(crate) processes: super::managed::ManagedProcesses,
-    scope: ScopeContract,
+    pub(crate) scope: ScopeContract,
     pub(crate) approval_wait: Arc<Mutex<Duration>>,
     pub(crate) cancel: CancelToken,
     /// Unified diff of the last applied edit, for display only; the model sees "Updated …".

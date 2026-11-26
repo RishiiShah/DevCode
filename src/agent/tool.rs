@@ -80,6 +80,50 @@ impl ToolRegistry {
         Some(f(&mut ctx.processes, &mut ctx.log))
     }
 
+    /// Replays `declare_scope` calls from a resumed conversation into `MutationContext::scope`.
+    pub(crate) fn restore_scope_from_messages(&self, messages: &[crate::agent::Message]) {
+        let Some(context) = &self.context else {
+            return;
+        };
+        let Ok(guard) = context.lock() else {
+            return;
+        };
+        for msg in messages {
+            if msg.role != crate::agent::Role::Assistant {
+                continue;
+            }
+            for call in &msg.tool_calls {
+                if call.name != "declare_scope" {
+                    continue;
+                }
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+                    continue;
+                };
+                let Some(files_val) = val.get("files").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                let Some(reason) = val.get("reason").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let files: Vec<std::path::PathBuf> = files_val
+                    .iter()
+                    .filter_map(|f| f.as_str().map(std::path::PathBuf::from))
+                    .collect();
+                guard.scope.declare(files, reason.to_string());
+            }
+        }
+    }
+
+    pub(crate) fn clear_scope(&self) {
+        if let Some(context) = &self.context {
+            if let Ok(guard) = context.lock() {
+                if let Ok(mut st) = guard.scope.state.lock() {
+                    *st = crate::discipline::ScopeState::default();
+                }
+            }
+        }
+    }
+
     pub fn schemas(&self) -> Vec<ToolSchema> {
         self.tools
             .values()
