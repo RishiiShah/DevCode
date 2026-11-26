@@ -271,6 +271,24 @@ pub fn check_shell_command(cmd: &str, root: &Path, guard_set: &[PathBuf]) -> Com
                 return CommandCheck::Ask("mv: destructive command pattern".to_string());
             }
             "rm" => {
+                // The harness keeps rollback snapshots in `.devcode/`; deleting them makes
+                // every later step fail and leaves nothing to restore.
+                for arg in parsed.words.iter().skip(1).filter(|w| !w.starts_with('-')) {
+                    let bare = arg.trim_matches('\'').trim_matches('"');
+                    let wipes_dotfiles = matches!(
+                        bare.trim_end_matches('/'),
+                        "." | ".." | ".*" | ".??*" | ".[!.]*" | "./.*"
+                    );
+                    let in_devcode = bare
+                        .replace('\\', "/")
+                        .split('/')
+                        .any(|c| c.eq_ignore_ascii_case(".devcode"));
+                    if wipes_dotfiles || in_devcode {
+                        return CommandCheck::Denied(format!(
+                            "'rm {bare}' would delete DevCode's rollback snapshots in .devcode/; name the files to remove instead"
+                        ));
+                    }
+                }
                 return CommandCheck::Ask("rm: destructive command pattern".to_string());
             }
             "sed" => {

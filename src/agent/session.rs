@@ -48,8 +48,13 @@ pub fn session_state(tools: &ToolRegistry) -> Result<SessionState, ModelError> {
     let mut changes = Vec::new();
     for (path, record) in pre {
         let old = match record.blob_ref {
-            Some(hash) => crate::manifest::read_blob(&ctx.root, &hash)
-                .map_err(|e| ModelError::Other(e.to_string()))?,
+            Some(hash) => match crate::manifest::read_blob(&ctx.root, &hash) {
+                Ok(bytes) => bytes,
+                // A snapshot deleted from `.devcode/blobs` (for example by `rm -rf`) must not
+                // fail every later step; that path just has no diff to show or restore.
+                Err(crate::manifest::ManifestError::BlobNotFound { .. }) => continue,
+                Err(e) => return Err(ModelError::Other(e.to_string())),
+            },
             None => Vec::new(),
         };
         let new = match std::fs::read(ctx.root.join(&path)) {
