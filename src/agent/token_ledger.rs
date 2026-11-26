@@ -111,6 +111,27 @@ pub fn summary(entries: &[LedgerEntry]) -> Option<String> {
             .map(|entry| field(&entry.estimated))
             .sum::<u64>()
     };
+    let (cached, cache_input) =
+        entries.iter().fold((0u128, 0u128), |(read, total), row| {
+            match row
+                .reported
+                .cache_read_tokens
+                .zip(row.reported.input_tokens)
+            {
+                Some((cached, input)) if cached <= input => {
+                    (read + u128::from(cached), total + u128::from(input))
+                }
+                _ => (read, total),
+            }
+        });
+    let hit_rate = if cache_input > 0 {
+        format!(
+            " · cache hit rate {:.1}%",
+            100.0 * cached as f64 / cache_input as f64
+        )
+    } else {
+        " · cache hit rate missing".to_owned()
+    };
     let (sampled, divergence) =
         entries.iter().fold((0, 0i128), |(count, sum), entry| {
             match entry.reported.input_tokens.zip(entry.calibrated_input) {
@@ -128,7 +149,7 @@ pub fn summary(entries: &[LedgerEntry]) -> Option<String> {
         String::new()
     };
     Some(format!(
-        "reported: {} input, {} output, {} uncached, {} cache read, {} cache write, {} reasoning · estimated input: {} system, {} schemas, {} history, {} file reads, {} command output{calibration}",
+        "reported: {} input, {} output, {} uncached, {} cache read, {} cache write, {} reasoning · estimated input: {} system, {} schemas, {} history, {} file reads, {} command output{calibration}{hit_rate}",
         total(|u| u.input_tokens),
         total(|u| u.output_tokens),
         total(|u| u.uncached_input_tokens),

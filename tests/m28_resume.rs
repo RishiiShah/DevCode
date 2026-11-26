@@ -127,6 +127,7 @@ fn resume_round_trips_edit_diff_ok_flag_and_tokens_and_loads_legacy_json() {
             usage: Usage {
                 input_tokens: Some(210),
                 output_tokens: Some(15),
+                cache_read_tokens: Some(63),
                 ..Usage::default()
             },
         }),
@@ -169,6 +170,10 @@ fn resume_round_trips_edit_diff_ok_flag_and_tokens_and_loads_legacy_json() {
         devcode::agent::token_ledger::LedgerEvent::Gate { .. }
     )));
     assert!(loaded.token_ledger[1].estimated.file_reads > 0);
+    assert!(second
+        .token_status()
+        .unwrap()
+        .contains("cache hit rate 30.0%"));
     assert_eq!(loaded.total_in, 360);
     assert_eq!(loaded.total_out, 55);
     assert_eq!(loaded.context_used, 210);
@@ -412,4 +417,5 @@ fn failed_model_call_keeps_reported_zero_and_missing_usage() {
     assert_eq!(row.reported.output_tokens, None);
     let status = resumed.token_status().unwrap();
     assert!(status.contains("0 input, missing output"), "{status}");
+    assert!(status.contains("cache hit rate missing"), "{status}");
 }

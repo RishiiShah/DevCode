@@ -195,6 +195,10 @@ impl Session {
         if let Some(record) = &capabilities {
             self.model
                 .set_stream_usage(record.values.streaming_usage != Some(false));
+            self.model.set_prompt_cache(
+                record.values.cache == Some(capabilities::CacheMechanism::Explicit),
+                record.values.tool_cache_breakpoints == Some(true),
+            );
         }
         let mut calibration = agent::token_ledger::Calibration::default();
         if let Some(provider) = &self.config.provider {

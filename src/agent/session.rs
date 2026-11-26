@@ -131,6 +131,9 @@ impl Model for RateLimitedModel {
     fn set_stream_usage(&self, enabled: bool) {
         self.model.set_stream_usage(enabled);
     }
+    fn set_prompt_cache(&self, enabled: bool, tool_breakpoints: bool) {
+        self.model.set_prompt_cache(enabled, tool_breakpoints);
+    }
     fn model_catalog(
         &self,
     ) -> Result<Vec<(String, crate::capabilities::ModelCapabilities)>, ModelError> {

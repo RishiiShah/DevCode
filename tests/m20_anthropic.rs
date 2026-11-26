@@ -355,3 +355,39 @@ fn thinking_blocks_replay_ahead_of_tool_use_only_when_effort_set() {
     assert_eq!(body["messages"][0]["content"][0]["type"], "tool_use");
     assert!(body.get("thinking").is_none());
 }
+
+#[test]
+fn explicit_cache_markers_keep_the_static_prefix_stable() {
+    let mut cfg = config("http://127.0.0.1:1".into());
+    cfg.model = "claude-sonnet-4-20250514".into();
+    let model = Anthropic::new(cfg).unwrap();
+    let mut req = tool_request();
+    req.system_prompt = "Keep responses concise.".into();
+    req.messages = vec![Message::user("first")];
+    let first = model.request_body(&req, None).unwrap();
+    let marker = serde_json::json!({"type":"ephemeral"});
+    assert_eq!(first["system"][0]["cache_control"], marker);
+    let tools = first["tools"].as_array().unwrap();
+    assert_eq!(tools.last().unwrap()["cache_control"], marker);
+    assert_eq!(first["messages"][0]["content"][0]["cache_control"], marker);
+
+    req.messages.push(Message::assistant("answer", vec![]));
+    req.messages.push(Message::user("second"));
+    let next = model.request_body(&req, None).unwrap();
+    assert_eq!(next["system"], first["system"]);
+    assert_eq!(next["tools"], first["tools"]);
+    assert_eq!(next["messages"][2]["content"][0]["cache_control"], marker);
+
+    model.set_prompt_cache(true, false);
+    let without_tool_breakpoint = model.request_body(&req, None).unwrap();
+    assert!(without_tool_breakpoint["tools"][0]["cache_control"].is_null());
+    assert_eq!(
+        without_tool_breakpoint["system"][0]["cache_control"],
+        marker
+    );
+
+    model.set_prompt_cache(false, false);
+    let uncached = model.request_body(&req, None).unwrap();
+    assert!(uncached["system"].is_string());
+    assert!(uncached["messages"][2]["content"][0]["cache_control"].is_null());
+}

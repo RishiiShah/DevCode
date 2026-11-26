@@ -16,6 +16,7 @@ pub struct Anthropic {
     key: String,
     client: ureq::Agent,
     last_request: Mutex<Option<Instant>>,
+    prompt_cache: Mutex<(bool, bool)>,
 }
 
 fn api_root(base_url: &str) -> String {
@@ -153,10 +154,12 @@ impl Anthropic {
                 "provider.max_rpm must be positive".into(),
             ));
         }
+        let cache = crate::config::model_context_window(&config.model).is_some();
         Ok(Self {
             config,
             key,
             last_request: Mutex::new(None),
+            prompt_cache: Mutex::new((cache, cache)),
             client: ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(10))
                 .timeout_read(Duration::from_secs(120))
@@ -277,8 +280,12 @@ impl Anthropic {
             .get("reasoning_effort")
             .and_then(Value::as_str)
             .is_some_and(|level| matches!(level, "low" | "medium" | "high"));
-        let messages = Self::anthropic_messages(&req.messages, thinking_enabled)?;
-        let tools: Vec<_> = req
+        let (cache, tool_breakpoints) = *self
+            .prompt_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut messages = Self::anthropic_messages(&req.messages, thinking_enabled)?;
+        let mut tools: Vec<_> = req
             .tools
             .iter()
             .map(|tool| {
@@ -289,6 +296,34 @@ impl Anthropic {
                 })
             })
             .collect();
+        if cache {
+            for message in &mut messages {
+                if let Some(text) = message["content"].as_str() {
+                    message["content"] = json!([{"type": "text", "text": text}]);
+                }
+            }
+            if let Some(block) = messages
+                .iter_mut()
+                .rev()
+                .filter_map(|message| {
+                    Some(message.get_mut("content")?.as_array_mut()?.iter_mut().rev())
+                })
+                .flatten()
+                .find(|block| {
+                    matches!(
+                        block.get("type").and_then(Value::as_str),
+                        Some("text" | "tool_use" | "tool_result")
+                    )
+                })
+            {
+                block["cache_control"] = json!({"type": "ephemeral"});
+            }
+            if tool_breakpoints {
+                if let Some(tool) = tools.last_mut() {
+                    tool["cache_control"] = json!({"type": "ephemeral"});
+                }
+            }
+        }
         let mut extra = self.config.extra_body.clone();
         let effort_budget = extra
             .remove("reasoning_effort")
@@ -319,7 +354,11 @@ impl Anthropic {
             body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
         }
         if !req.system_prompt.is_empty() {
-            body["system"] = json!(req.system_prompt);
+            body["system"] = if cache {
+                json!([{"type": "text", "text": req.system_prompt, "cache_control": {"type": "ephemeral"}}])
+            } else {
+                json!(req.system_prompt)
+            };
         }
         if let Some(object) = body.as_object_mut() {
             object.extend(extra);
@@ -851,6 +890,13 @@ fn stored_thinking(calls: &[ToolCall]) -> Vec<Value> {
 }
 
 impl Model for Anthropic {
+    fn set_prompt_cache(&self, enabled: bool, tool_breakpoints: bool) {
+        *self
+            .prompt_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = (enabled, tool_breakpoints);
+    }
+
     fn redact_sensitive(&self, text: &str) -> String {
         self.redact(text)
     }

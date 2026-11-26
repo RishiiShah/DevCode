@@ -433,6 +433,9 @@ pub trait Model: Send + Sync {
         false
     }
     fn set_stream_usage(&self, _enabled: bool) {}
+
+    /// Applies the resolved explicit-cache capabilities for the active model.
+    fn set_prompt_cache(&self, _enabled: bool, _tool_breakpoints: bool) {}
     fn model_catalog(
         &self,
     ) -> Result<Vec<(String, crate::capabilities::ModelCapabilities)>, ModelError> {

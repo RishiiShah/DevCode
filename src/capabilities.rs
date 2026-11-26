@@ -26,6 +26,7 @@ pub struct ModelCapabilities {
     pub streaming_usage: Option<bool>,
     pub reasoning_control: Option<bool>,
     pub cache: Option<CacheMechanism>,
+    pub tool_cache_breakpoints: Option<bool>,
     pub context_window: Option<u64>,
     pub max_output: Option<u64>,
     pub vision: Option<bool>,
@@ -94,6 +95,13 @@ pub(crate) fn resolve(
             Some(false)
         ),
         cache: choose!(cache, bundled_cache, Some(CacheMechanism::None)),
+        tool_cache_breakpoints: choose!(
+            tool_cache_breakpoints,
+            bundled_cache
+                .filter(|mode| *mode == CacheMechanism::Explicit)
+                .map(|_| true),
+            Some(false)
+        ),
         context_window: choose!(
             context_window,
             configured
